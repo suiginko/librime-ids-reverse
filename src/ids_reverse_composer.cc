@@ -514,10 +514,12 @@ rime::ProcessResult IdsReverseProcessor::ProcessKeyEvent(
     bool is_result =
         outer_type == "ids_reverse" || outer_type == "hanzi_result" ||
         genuine_type == "ids_reverse" || genuine_type == "hanzi_result";
-    // 单字部件候选也允许直接查异体字，例如 O葵/。
-    bool is_single_component = (outer_type == "hanzi_component" ||
-                                genuine_type == "hanzi_component") &&
-                               Utf8Length(cand->text()) == 1;
+    // 单字部件候选也允许直接查异体字，例如 O葵/ 或 Oxuh/（兼容宿主方案滤镜包装的单字候选）。
+    bool is_single_component =
+        (outer_type == "hanzi_component" ||
+         genuine_type == "hanzi_component" ||
+         IsComponentText(cand->text(), 1)) &&
+        Utf8Length(cand->text()) == 1;
     if (!is_result && !is_single_component) {
       ctx->set_property(kVariantsProperty, "");
       return rime::kNoop;
