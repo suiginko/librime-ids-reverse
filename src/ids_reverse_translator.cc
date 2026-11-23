@@ -1103,6 +1103,32 @@ int64_t ScoreCandidate(
     uint16_t ct = h.char_token;
     if (ct != kNoToken && MatcherHas(*matchers[0], ct))
       return 30000000 + freq;
+
+    // 单部件检字直接度分层：
+    // Tier 2: 纯单部件变体/镜像（实义构件仅有输入的该部件自身，如 2010F 𠄏 = ⿿了）
+    // Tier 3: 顶层直接包含（Leaves 显式包含该部件，如 辽, 子, 𠆨, 𠮩, 𡤼）
+    // Tier 4: 深层间接包含（如 㞌=尸子 间接包含 了）
+    const uint16_t* leaves = nullptr;
+    uint16_t n_leaves = 0;
+    store.Leaves(id, &leaves, &n_leaves);
+    bool direct_hit = false;
+    int real_comp_count = 0;
+    for (uint16_t i = 0; i < n_leaves; ++i) {
+      uint32_t cp = store.TokenCp(leaves[i]);
+      // 排除 IDC 结构字符及镜像/旋转算子 (U+2FF0 ~ U+2FFF) 与 ASCII 符号
+      if ((cp >= 0x2FF0 && cp <= 0x2FFF) || cp <= 127)
+        continue;
+      ++real_comp_count;
+      if (MatcherHas(*matchers[0], leaves[i]) ||
+          MatcherHas(*matchers[0], store.CanonToken(leaves[i]))) {
+        direct_hit = true;
+      }
+    }
+    if (direct_hit && real_comp_count <= 1)
+      return 20000000 + freq - depth * 1000;
+    if (direct_hit)
+      return 10000000 + freq - depth * 1000;
+    return static_cast<int64_t>(freq) - static_cast<int64_t>(depth) * 1000;
   }
   int mt = 0;
   if (total >= 1 && total <= 31 && (h.flags & (1u << total))) {
