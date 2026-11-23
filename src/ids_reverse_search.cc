@@ -477,6 +477,40 @@ int64_t ScoreHybridTokens(IdsStore& store, uint32_t id, const QueryAtoms& q) {
   uint16_t atom_n = 0;
   store.Atomics(id, &atoms, &atom_n);
 
+  // 单部件检字直接度分层天梯：
+  // Tier 1: 纯单部件变体/镜像/自身（如 2010F 𠄏 = ⿿了）
+  // Tier 2: 顶层直接包含（Leaves 显式包含该部件，如 辽, 孑, 孓, 钌, 𠮾, 𠆨, 叮, 𡤼）
+  // Tier 3: 深层间接包含（如 㞌=尸子 间接包含 了，剥夺大区加分特权排在后面）
+  if (q.norm.size() == 1) {
+    uint16_t target_tok = q.norm[0];
+    const HotRec& h = store.Hot(id);
+
+    if (h.char_token == target_tok)
+      return 50000000 + h.freq;
+
+    bool direct_hit = false;
+    int real_comp_count = 0;
+    for (uint16_t i = 0; i < leaf_n; ++i) {
+      uint32_t cp = store.TokenCp(leaves[i]);
+      if ((cp >= 0x2FF0 && cp <= 0x2FFF) || cp <= 127)
+        continue;
+      ++real_comp_count;
+      if (store.CanonToken(leaves[i]) == target_tok || leaves[i] == target_tok) {
+        direct_hit = true;
+      }
+    }
+
+    if (direct_hit && real_comp_count <= 1)
+      return 40000000 + h.freq - h.depth * 1000;
+
+    if (direct_hit) {
+      int64_t b_bonus = (h.block == 0) ? 2000000 : ((h.block == 1) ? 1000000 : 0);
+      return 20000000 + b_bonus + h.freq / 100 - h.depth * 1000;
+    }
+
+    return static_cast<int64_t>(h.freq / 100) - static_cast<int64_t>(h.depth) * 10000;
+  }
+
   bool satisfied = true;
   int missing_count = 0;
   for (const auto& c : q.counts) {
