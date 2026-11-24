@@ -758,7 +758,8 @@ class HybridFilterTranslation : public rime::PrefetchTranslation {
       const bool component_stage = seg.HasTag("hanzi_component");
       if (!component_stage)
         continue;
-      if (next->end() == seg.end && IsComponentExpression(next->text()) &&
+      if (next->start() >= seg.start && next->end() <= seg.end &&
+          IsComponentExpression(next->text()) &&
           seen_.insert(next->text()).second) {
         cache_.push_back(New<rime::ShadowCandidate>(next, "hanzi_component"));
       }

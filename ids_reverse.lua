@@ -1153,8 +1153,10 @@ local function decode_shuangpin_string(store, s, scheme)
       end
     end
     if n % 2 == 1 then
-      local rem = part:sub(n, n)
-      res[#res + 1] = sp_initials(rem) or rem
+      if pair_count == 0 then
+        local rem = part:sub(n, n)
+        res[#res + 1] = sp_initials(rem) or rem
+      end
     end
   end
   return res
@@ -3926,7 +3928,7 @@ local function build_multi_component_candidates(store, tokens, segment, config,
       seen[combo.text] = true
       local cand = Candidate("hanzi_component", segment.start, segment._end,
                              combo.text, "多部件")
-      cand.quality = 100.0
+      cand.quality = 0.0
       yield(cand)
       emitted = emitted + 1
     end
@@ -4180,7 +4182,7 @@ local function filter_func(input, env)
     else
       local seg2 = ctx.composition:back()
       if seg2:has_tag("hanzi_component") then
-        if cand._end == seg2._end and is_component_expression(cand.text)
+        if cand._start >= seg2.start and cand._end <= seg2._end and is_component_expression(cand.text)
            and not seen[cand.text] then
           seen[cand.text] = true
           yield(ShadowCandidate(cand, "hanzi_component"))

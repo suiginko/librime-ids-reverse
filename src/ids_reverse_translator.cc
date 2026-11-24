@@ -493,11 +493,13 @@ bool DecodeShuangpinString(IdsStore& store,
         return false;
     }
     if (n_part % 2 == 1) {
-      char rem = part[n_part - 1];
-      if (const char* m = SpInitialsMap(rem))
-        res.push_back(m);
-      else
-        res.push_back(std::string(1, rem));
+      if (pairs == 0) {
+        char rem = part[n_part - 1];
+        if (const char* m = SpInitialsMap(rem))
+          res.push_back(m);
+        else
+          res.push_back(std::string(1, rem));
+      }
     }
   }
   out->swap(res);
@@ -2095,7 +2097,7 @@ void IdsReverseTranslator::BuildMultiComponentCandidates(
       continue;
     auto cand = rime::New<rime::SimpleCandidate>(
         "hanzi_component", segment.start, segment.end, combo.text, "多部件");
-    cand->set_quality(100.0);
+    cand->set_quality(0.0);
     translation->Append(cand);
     ++emitted;
   }
