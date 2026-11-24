@@ -1960,12 +1960,15 @@ void IdsReverseTranslator::BuildResultCandidates(
       show_block = ctx->get_option("show_block");
   }
   std::string preedit = "\t";
-  if (pending == "-")
-    preedit = "-\t";
-  else if (pending == "+")
-    preedit = "+\t";
-  else if (pending == "!")
-    preedit = "!\t";
+  if (ctx && segment.end > segment.start &&
+      segment.end <= static_cast<int>(ctx->input().size())) {
+    std::string seg_text =
+        ctx->input().substr(segment.start, segment.end - segment.start);
+    if (!seg_text.empty())
+      preedit = seg_text + "\t";
+  } else if (!pending.empty()) {
+    preedit = pending + "\t";
+  }
 
   for (uint32_t id : results) {
     uint32_t cp = store.CpOfId(id);

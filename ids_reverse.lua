@@ -3819,9 +3819,14 @@ local function build_result_candidates(store, results, segment, pending,
                                        config, ctx)
   local show_pinyin, show_ids, show_unicode, show_block = show_options(config, ctx)
   local preedit = "\t"
-  if pending == "-" then preedit = "-\t"
-  elseif pending == "+" then preedit = "+\t"
-  elseif pending == "!" then preedit = "!\t" end
+  if ctx and segment._end > segment.start and segment._end <= #ctx.input then
+    local seg_text = ctx.input:sub(segment.start + 1, segment._end)
+    if seg_text ~= "" then
+      preedit = seg_text .. "\t"
+    end
+  elseif pending ~= "" then
+    preedit = pending .. "\t"
+  end
   for _, id in ipairs(results) do
     local text = cp_to_utf8(store:cp_of_id(id))
     local comment = build_comment(store, id, show_pinyin, show_ids,
