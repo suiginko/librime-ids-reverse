@@ -121,15 +121,16 @@ void IdsReverseProcessor::OnSelectAfter(Context* ctx) {
   } else {
     HybridState st = ReadHybridState(ctx, config_.hybrid.prefix);
     std::string text = selected_component_;
-    if (!text.empty() && !st.pending.empty() && st.pending[0] == '-' &&
-        text[0] != '-') {
-      text = "-" + text;
-    } else if (!text.empty() && !st.pending.empty() && st.pending[0] == '+' &&
-               text[0] != '+') {
-      text = "+" + text;
-    } else if (!text.empty() && !st.pending.empty() && st.pending[0] == '!' &&
-               text[0] != '!') {
-      text = "!" + text;
+    std::string prefix_ops;
+    for (char c : st.pending) {
+      if (c == '-' || c == '+' || c == '!' || c == '(') {
+        prefix_ops.push_back(c);
+      } else {
+        break;
+      }
+    }
+    if (!text.empty() && !prefix_ops.empty() && !StartsWith(text, prefix_ops)) {
+      text = prefix_ops + text;
     }
     ctx->set_property(kVariantsProperty, "");
     ctx->set_property(kVariantsResultProperty, "");
@@ -669,7 +670,8 @@ bool IdsReverseSegmentor::Proceed(Segmentation* segmentation) {
   } else {
     size_t next_quote = input.find('\'', start + 1);
     char first_char = (start < input.size()) ? input[start] : '\0';
-    if (first_char == '-' || first_char == '+' || first_char == '!') {
+    if (first_char == '-' || first_char == '+' || first_char == '!' ||
+        first_char == '(' || first_char == ')') {
       bool has_code_after =
           (start + 1 < input.size()) &&
           (next_quote == std::string::npos || next_quote > start + 1);

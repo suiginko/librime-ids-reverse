@@ -3958,8 +3958,14 @@ local function parse_pending_components(store, pending, mode)
   local out = { valid = false, tokens = {} }
   if pending == "" then return out end
   local i = 1
-  local first = pending:sub(1, 1)
-  if first == "-" or first == "+" or first == "!" then i = 2 end
+  while i <= #pending do
+    local c = pending:sub(i, i)
+    if c == "-" or c == "+" or c == "!" or c == "(" then
+      i = i + 1
+    else
+      break
+    end
+  end
   local ascii = {}
   local function flush_ascii()
     if #ascii == 0 then return true end
@@ -3974,7 +3980,10 @@ local function parse_pending_components(store, pending, mode)
   while i <= #pending do
     local c = pending:sub(i, i)
     if c == "-" or c == "+" then return out end
-    if c == "'" or c == " " or c == "\t" or c == "\r" or c == "\n"
+    if c == "(" or c == ")" then
+      if not flush_ascii() then return out end
+      i = i + 1
+    elseif c == "'" or c == " " or c == "\t" or c == "\r" or c == "\n"
        or c == "." or c == "_" then
       if not flush_ascii() then return out end
       i = i + 1
@@ -4060,16 +4069,29 @@ local function query_hybrid(segment, env)
     return
   end
 
-  if (pending == "" or pending == "-" or pending == "+" or pending == "!")
-     and #st.components > 0 then
-    local results = search_hybrid(store, st.components,
+  local is_operator_only = false
+  if pending ~= "" then
+    is_operator_only = true
+    for idx = 1, #pending do
+      local b = pending:sub(idx, idx)
+      if b ~= "-" and b ~= "+" and b ~= "!" and b ~= "(" and b ~= ")" then
+        is_operator_only = false
+        break
+      end
+    end
+  end
+
+  if (pending == "" or is_operator_only) and #st.components > 0 then
+    local comp_list = {}
+    for _, comp in ipairs(st.components) do comp_list[#comp_list + 1] = comp end
+    if pending ~= "" then comp_list[#comp_list + 1] = pending end
+    local results = search_hybrid(store, comp_list,
                                   pinyin_mode(env.config, ctx),
                                   env.config.max_results,
                                   env.config.disabled_blocks_enabled
                                     and env.config.disabled_blocks or nil)
     build_result_candidates(store, results, segment, pending, env.config, ctx)
-  elseif pending ~= "" and pending ~= "-" and pending ~= "+" and pending ~= "!"
-         and has_component then
+  elseif pending ~= "" and not is_operator_only and has_component then
     local parsed = parse_pending_components(store, pending,
                                             pinyin_mode(env.config, ctx))
     if parsed.valid and #parsed.tokens >= 2 then

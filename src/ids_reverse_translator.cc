@@ -777,8 +777,11 @@ PendingComponents ParsePendingComponents(IdsStore& store,
     return out;
 
   size_t i = 0;
-  if (pending[0] == '-' || pending[0] == '+' || pending[0] == '!')
-    i = 1;
+  // 跳过所有前置运算符及左括号，例如 -, +, !, (, -(, +(, !(
+  while (i < pending.size() && (pending[i] == '-' || pending[i] == '+' ||
+                                pending[i] == '!' || pending[i] == '(')) {
+    ++i;
+  }
 
   std::string ascii;
   auto flush_ascii = [&]() -> bool {
@@ -797,6 +800,12 @@ PendingComponents ParsePendingComponents(IdsStore& store,
     unsigned char c = static_cast<unsigned char>(pending[i]);
     if (c == '-' || c == '+')
       return out;  // 一次连写内部的运算符暂不支持
+    if (c == '(' || c == ')') {
+      if (!flush_ascii())
+        return out;
+      ++i;
+      continue;
+    }
     if (IsPendingSeparator(c)) {
       if (!flush_ascii())
         return out;
@@ -2227,15 +2236,24 @@ rime::an<rime::Translation> IdsReverseTranslator::QueryHybrid(
       BuildVariantCandidates(store, base_id, base, preedit, segment,
                              translation.get());
     }
-  } else if ((pending.empty() || pending == "-" || pending == "+" ||
-              pending == "!") &&
-             !st.components.empty()) {
+  } else if (!st.components.empty() &&
+             ([&]() {
+               if (pending.empty())
+                 return true;
+               for (char c : pending) {
+                 if (c != '-' && c != '+' && c != '!' && c != '(' && c != ')')
+                   return false;
+               }
+               return true;
+             })()) {
+    std::vector<std::string> comp_list = st.components;
+    if (!pending.empty())
+      comp_list.push_back(pending);
     std::vector<uint32_t> results = SearchHybrid(
-        store, st.components, PinyinMode(), config_.max_results,
+        store, comp_list, PinyinMode(), config_.max_results,
         config_.disabled_blocks_enabled ? &config_.disabled_blocks : nullptr);
     BuildResultCandidates(store, results, segment, pending, translation.get());
-  } else if (!pending.empty() && pending != "-" && pending != "+" &&
-             pending != "!" && has_component) {
+  } else if (!pending.empty() && has_component) {
     PendingComponents parsed =
         ParsePendingComponents(store, pending, PinyinMode());
     if (parsed.valid && parsed.tokens.size() >= 2) {
