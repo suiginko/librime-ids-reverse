@@ -163,6 +163,49 @@ ok(I.is_component_expression("渺-(水少)"), "括号表达式合法")
 ok(not I.is_component_expression("渺-(水+少)"), "括号内运算符非法")
 ok(not I.is_component_expression("渺-(水少"), "括号未闭合非法")
 
+-- 括号编辑辅助函数
+local run_start, run_end = I.find_last_ascii_run("(沐-mu")
+ok(run_start ~= nil and string.sub("(沐-mu", run_start, run_end) == "mu",
+   "查找最后一个拼音段")
+ok(I.replace_last_ascii_run("(沐-mu", "木") == "(沐-木",
+   "替换最后一个拼音段")
+local open_group = I.parse_single_group("-(shui")
+ok(open_group and open_group.op == "-" and open_group.inner == "shui"
+   and not open_group.closed, "识别未闭合括号表达式")
+local closed_group = I.parse_single_group("-(沐-木)")
+ok(closed_group and closed_group.op == "-" and closed_group.inner == "沐-木"
+   and closed_group.closed, "识别已闭合括号表达式")
+
+local comps, excludes = I.evaluate_algebra_expression(store, "沐-木", "quanpin")
+ok(#comps == 1 and comps[1] == "氵" and #excludes == 0,
+   "括号求值 沐-木 -> 氵")
+comps, excludes = I.evaluate_algebra_expression(store, "森-木", "quanpin")
+ok(#comps == 1 and comps[1] == "林", "括号求值 森-木 -> 林")
+comps, excludes = I.evaluate_algebra_expression(store, "沐!木", "quanpin")
+ok(#comps == 1 and comps[1] == "沐" and #excludes == 1 and excludes[1] == "木",
+   "括号求值 沐!木")
+comps, excludes = I.evaluate_algebra_expression(store, "沐 ' - 木", "quanpin")
+ok(#comps == 1 and comps[1] == "氵", "括号求值忽略分隔符")
+comps, excludes = I.evaluate_algebra_expression(store, "(沐-木)+口", "quanpin")
+ok(#comps == 2 and comps[1] == "氵" and comps[2] == "口",
+   "括号求值支持嵌套")
+ok(I.format_group_component("-", { "氵" }, {}) == "-氵",
+   "括号结果加外层运算符")
+
+-- 模拟 Oshao 选少 → (mu 选沐 → -mu 选木 → ) 的括号编辑流程
+local pending = "(mu"
+pending = I.replace_last_ascii_run(pending, "沐")
+pending = pending .. "-mu"
+pending = I.replace_last_ascii_run(pending, "木")
+local flow_group = I.parse_single_group(pending .. ")")
+ok(flow_group and flow_group.closed and flow_group.inner == "沐-木",
+   "括号编辑流程 沐-木")
+local flow_comps = I.evaluate_algebra_expression(store, flow_group.inner, "quanpin")
+ok(#flow_comps == 1 and flow_comps[1] == "氵", "括号编辑流程求值 氵")
+
+local shao_shui = hybrid({ "少", "氵" })
+ok(utf8.char(store:cp_of_id(shao_shui[1])) == "沙", "O 少+氵 首选 沙")
+
 local qian_id = store:id_of_cp(utf8.codepoint("芌"))
 local yu_id = store:id_of_cp(utf8.codepoint("芋"))
 local qian_variants = store:variants(qian_id)

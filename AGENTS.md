@@ -23,6 +23,7 @@ Chinese; preserve that.
 | `src/ids_reverse_composer.{h,cc}` | `IdsReverseProcessor`, `IdsReverseSegmentor`, `IdsReverseFilter`; all key handling. |
 | `src/ids_reverse_translator.{h,cc}` | Translator, I-mode search, O-mode candidate construction, pinyin/shuangpin decoding. |
 | `src/ids_reverse_search.{h,cc}` | O-mode `SearchHybrid` (add/subtract/exclude algebra) and component candidates. |
+| `src/ids_reverse_group.{h,cc}` | O-mode single-group pending parser and group-component formatting helpers. |
 | `ids_reverse.lua` | Whole Lua implementation; exports `processor`/`segmentor`/`translator`/`filter` and `_internal` for tests. |
 | `data/` | Generator, raw input tables, ignored outputs. |
 | `examples/` | Standalone schema and patch templates. |
@@ -161,24 +162,43 @@ State lives in the context property `ids_reverse_components`, one
 the input against the prefix and codes and returns the uncommitted `pending`
 text; `SaveHybridState` writes it back.
 
+There is **no direct Chinese-character input** in O mode: Chinese characters
+enter the composition only when a pinyin/shuangpin candidate is selected. A
+selected component replaces its pinyin code in the input and is stored as both
+`component` and `code` (so the preedit shows `Oshao` → `O少`). Components picked
+as a multi-character combo are stored as one layer; Backspace removes
+`len(code) + 1` bytes (the code plus its following quote).
+
 - **Processor**: Return confirms result/multi-char candidates or turns a pending
   code into a component; Backspace removes pending text or the last component;
   `1`–`6` and `;` select; space confirms; `/` starts a variant query;
   `Shift+V` replaces the preedit character with the selected variant;
   letters and `-`/`+`/`!` are pushed as input. `select_notifier` temporarily
   disables `_auto_commit` and commits result candidates itself.
+- **Parentheses** are edited incrementally: while `pending` is a single
+  `[op]? ( ... )?` expression, selecting a component replaces only the last
+  unresolved ASCII pinyin run and does not commit state. When `)` closes the
+  outermost group and no ASCII runs remain, the processor evaluates the inner
+  expression with `EvaluateAlgebraExpression`, stores the remaining components
+  (plus any `!` exclusions) as one component, and pushes a quote.
 - **Segmentor**: emits the prefix segment, confirmed component segments, and a
   pending `hanzi_component` segment; operators get confirmed segments.
 - **Translator** (`QueryHybrid`), in order: variant-result stage, variant query,
-  results for selected components, pending multi-syllable/multi-character
-  candidates, single-component candidates, raw component expressions.
+  single-group editor (component candidates for the last ASCII run), results for
+  selected components, pending multi-syllable/multi-character candidates,
+  single-component candidates, raw component expressions.
 - **Filter**: drops non-plugin candidates, deduplicates component expressions,
   and scans at most 2000 candidates to avoid walking huge dictionaries.
 - **Search**: `SearchHybrid` applies `-`, `+`/`=`, and `!` algebra with `()`
-  grouping (no operators inside parentheses), expands pure subtraction to
-  characters containing the remainder, matches leaves, then ranks. Exact
-  top-level leaf multiset hits from `LEAF_STRUCT` are merged first and scored
-  with the same exact-structure floor as I mode.
+  grouping, expands pure subtraction to characters containing the remainder,
+  matches leaves, then ranks. Exact top-level leaf multiset hits from
+  `LEAF_STRUCT` are merged first and scored with the same exact-structure floor
+  as I mode. Group parentheses are resolved before state entry, so `SearchHybrid`
+  normally receives only paren-free component strings.
+- **Group evaluator**: `EvaluateAlgebraExpression` (C++) /
+  `evaluate_algebra_expression` (Lua) computes `+`/`-`/`!` and nested
+  parentheses over components only, without dictionary lookup. It is used when
+  committing a closed group, not by `SearchHybrid`.
 
 Variants use the properties `ids_reverse_variants` (base character) and
 `ids_reverse_variants_result` (replacement), plus the internal segment tag
@@ -260,6 +280,7 @@ one changed. Applies to:
 | Add component alias | C++ `CanonMap`, generator `EQUIV_GROUPS`, Lua `CANON_MAP` |
 | Add block name/alias | `ids_store.cc`, both `kBlockNames`, Lua tables, dump script |
 | Change search/ranking | `src/ids_reverse_translator.cc` (`SearchComponents`, `ScoreCandidate`) and/or `src/ids_reverse_search.cc` (`SearchHybrid`), plus Lua equivalents |
+| Change O-mode group editing | `src/ids_reverse_group.{h,cc}`, composer `OnSelectAfter`/`ProcessKeyEvent`, translator `QueryHybrid`, `EvaluateAlgebraExpression`, plus Lua equivalents |
 
 ## Before committing
 
