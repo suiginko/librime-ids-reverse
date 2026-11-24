@@ -18,6 +18,7 @@
 #include <rime/segmentation.h>
 
 #include "ids_reverse_config.h"
+#include "ids_reverse_group.h"
 #include "ids_reverse_search.h"
 #include "ids_store.h"
 #include "ids_text.h"
@@ -49,6 +50,54 @@ bool HasVariants(const std::string& text) {
   uint16_t n = 0;
   store.Variants(id, &variants, &n);
   return n > 0;
+}
+
+std::string CurrentPinyinMode(Context* ctx, const ReverseConfig& config) {
+  std::string mode = config.shuangpin_scheme;
+  if (ctx) {
+    if (ctx->get_option("shuangpin_flypy") ||
+        ctx->get_option("double_pinyin")) {
+      mode = "flypy";
+    } else if (ctx->get_option("shuangpin_zrm")) {
+      mode = "zrm";
+    } else if (ctx->get_option("pinyin_quanpin")) {
+      mode = "quanpin";
+    }
+  }
+  return mode;
+}
+
+// 括号闭合且内部拼音都已消歧后，求值并作为一个部件加入状态。
+bool TryCommitClosedGroup(Context* ctx, const ReverseConfig& config) {
+  if (!ctx || !IsReverseActive(ctx, config.hybrid.prefix))
+    return false;
+  HybridState st = ReadHybridState(ctx, config.hybrid.prefix);
+  PendingGroup group = ParseSingleGroup(st.pending);
+  if (!group.valid || !group.closed)
+    return false;
+  size_t run_start = 0, run_end = 0;
+  if (FindLastAsciiRun(st.pending, &run_start, &run_end))
+    return false;
+  if (!EnsureIdsStoreLoaded(config))
+    return false;
+  IdsStore& store = IdsStore::Instance();
+  AlgebraEvaluation eval;
+  if (!EvaluateAlgebraExpression(store, group.inner,
+                                 CurrentPinyinMode(ctx, config), &eval))
+    return false;
+  std::string component =
+      FormatGroupComponent(group.op, eval.components, eval.excludes);
+  const std::string& input = ctx->input();
+  std::string base = input.substr(0, input.size() - st.pending.size());
+  if (component.empty()) {
+    ctx->set_input(base);
+    return true;
+  }
+  st.components.push_back(component);
+  st.codes.push_back(st.pending);
+  SaveHybridState(ctx, st.components, st.codes);
+  ctx->set_input(base + st.pending + "'");
+  return true;
 }
 
 }  // namespace
@@ -119,24 +168,40 @@ void IdsReverseProcessor::OnSelectAfter(Context* ctx) {
     ctx->set_property(kVariantsResultProperty, "");
     ctx->Clear();
   } else {
-    HybridState st = ReadHybridState(ctx, config_.hybrid.prefix);
-    std::string text = selected_component_;
-    if (!text.empty() && !st.pending.empty() && st.pending[0] == '-' &&
-        text[0] != '-') {
-      text = "-" + text;
-    } else if (!text.empty() && !st.pending.empty() && st.pending[0] == '+' &&
-               text[0] != '+') {
-      text = "+" + text;
-    } else if (!text.empty() && !st.pending.empty() && st.pending[0] == '!' &&
-               text[0] != '!') {
-      text = "!" + text;
-    }
     ctx->set_property(kVariantsProperty, "");
     ctx->set_property(kVariantsResultProperty, "");
-    st.components.push_back(text);
-    st.codes.push_back(st.pending);
-    SaveHybridState(ctx, st.components, st.codes);
-    ctx->PushInput("'");
+    HybridState st = ReadHybridState(ctx, config_.hybrid.prefix);
+    std::string text = selected_component_;
+    PendingGroup group = ParseSingleGroup(st.pending);
+    if (group.valid) {
+      // 括号内：只把当前拼音段替换成所选汉字，不提交为状态部件。
+      size_t run_start = 0, run_end = 0;
+      if (!text.empty() && FindLastAsciiRun(st.pending, &run_start, &run_end)) {
+        std::string new_pending =
+            st.pending.substr(0, run_start) + text + st.pending.substr(run_end);
+        std::string base =
+            ctx->input().substr(0, ctx->input().size() - st.pending.size());
+        ctx->set_input(base + new_pending);
+        TryCommitClosedGroup(ctx, config_);
+      }
+    } else {
+      if (!text.empty() && !st.pending.empty() && st.pending[0] == '-' &&
+          text[0] != '-') {
+        text = "-" + text;
+      } else if (!text.empty() && !st.pending.empty() && st.pending[0] == '+' &&
+                 text[0] != '+') {
+        text = "+" + text;
+      } else if (!text.empty() && !st.pending.empty() && st.pending[0] == '!' &&
+                 text[0] != '!') {
+        text = "!" + text;
+      }
+      std::string base =
+          ctx->input().substr(0, ctx->input().size() - st.pending.size());
+      st.components.push_back(text);
+      st.codes.push_back(text);
+      SaveHybridState(ctx, st.components, st.codes);
+      ctx->set_input(base + text + "'");
+    }
   }
 
   if (restore_auto_commit && !ctx->get_option("_auto_commit"))
@@ -351,15 +416,6 @@ rime::ProcessResult IdsReverseProcessor::ProcessKeyEvent(
     return rime::kNoop;
   }
 
-  // 兼容前端把汉字以 X11 Unicode keysym 直接送入 O 模式的情况。
-  if (!ctrl && !alt && code >= 0x01000100 && code <= 0x0110FFFF) {
-    uint32_t cp = static_cast<uint32_t>(code - 0x01000000);
-    if (IsComponentChar(cp)) {
-      ctx->PushInput(CpToUtf8(cp));
-      return rime::kAccepted;
-    }
-  }
-
   if (code == XK_Escape || repr == "Escape") {
     ctx->set_property(kVariantsProperty, "");
     ctx->set_property(kVariantsResultProperty, "");
@@ -392,8 +448,15 @@ rime::ProcessResult IdsReverseProcessor::ProcessKeyEvent(
           ctx->ConfirmCurrentSelection();
           return rime::kAccepted;
         }
+        // 括号内单字部件也用回车确认，交给 OnSelectAfter 替换当前拼音段。
+        if (ParseSingleGroup(st.pending).valid) {
+          ctx->ConfirmCurrentSelection();
+          return rime::kAccepted;
+        }
       }
     }
+    if (ParseSingleGroup(st.pending).valid)
+      return rime::kAccepted;
     if (!st.pending.empty() && st.pending != "-" && st.pending != "+" &&
         st.pending != "!") {
       if (!ctx->composition().empty())
@@ -438,6 +501,7 @@ rime::ProcessResult IdsReverseProcessor::ProcessKeyEvent(
       }
       ctx->PopInput(pending_bytes);
     } else if (!st.components.empty()) {
+      const size_t code_len = st.codes.back().size();
       st.components.pop_back();
       st.codes.pop_back();
       SaveHybridState(ctx, st.components, st.codes);
@@ -445,7 +509,7 @@ rime::ProcessResult IdsReverseProcessor::ProcessKeyEvent(
         ctx->composition().pop_back();
       if (!ctx->composition().empty())
         ctx->composition().back().status = Segment::kGuess;
-      ctx->PopInput(1);
+      ctx->PopInput(code_len + 1);
     } else {
       ctx->Clear();
     }
@@ -487,9 +551,8 @@ rime::ProcessResult IdsReverseProcessor::ProcessKeyEvent(
   bool is_exclude = !ctrl && !alt &&
                     (code == XK_exclam || repr == "!" || repr == "exclam" ||
                      (code == XK_1 && shift));
-  bool is_lparen =
-      !ctrl && !alt &&
-      (code == XK_parenleft || repr == "(" || repr == "parenleft");
+  bool is_lparen = !ctrl && !alt &&
+                   (code == XK_parenleft || repr == "(" || repr == "parenleft");
   bool is_rparen =
       !ctrl && !alt &&
       (code == XK_parenright || repr == ")" || repr == "parenright");
@@ -603,6 +666,8 @@ rime::ProcessResult IdsReverseProcessor::ProcessKeyEvent(
     }
     ctx->set_property(kVariantsProperty, "");
     ctx->PushInput(std::string(1, ch));
+    if (is_rparen)
+      TryCommitClosedGroup(ctx, config_);
     return rime::kAccepted;
   }
 

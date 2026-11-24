@@ -1140,6 +1140,125 @@ std::vector<uint32_t> SearchByLeaves(IdsStore& store,
 
 }  // namespace
 
+namespace {
+
+struct AlgebraEvalState {
+  std::vector<std::string> components;
+  std::vector<std::string> excludes;
+  bool has_sub = false;
+};
+
+void ApplyEvalItem(IdsStore& store,
+                   AlgebraEvalState* st,
+                   char op,
+                   const std::string& raw,
+                   const std::string& mode) {
+  std::string item = NormalizeAlgebraItem(store, raw, mode);
+  if (item.empty())
+    return;
+  if (op == '+') {
+    st->components.push_back(item);
+  } else if (op == '!') {
+    st->excludes.push_back(item);
+  } else {
+    st->has_sub = true;
+    st->components = ApplySingleSubtraction(store, st->components, item);
+  }
+}
+
+void MergeEvalGroup(IdsStore& store,
+                    AlgebraEvalState* st,
+                    char op,
+                    const AlgebraEvalState& inner) {
+  st->has_sub = st->has_sub || inner.has_sub;
+  for (const auto& item : inner.components) {
+    if (op == '+') {
+      st->components.push_back(item);
+    } else if (op == '!') {
+      st->excludes.push_back(item);
+    } else {
+      st->has_sub = true;
+      st->components = ApplySingleSubtraction(store, st->components, item);
+    }
+  }
+  for (const auto& e : inner.excludes)
+    st->excludes.push_back(e);
+}
+
+bool IsEvalSeparator(char c) {
+  return c == '\'' || c == ' ' || c == '\t' || c == '\r' || c == '\n' ||
+         c == '.' || c == '_';
+}
+
+size_t EvalAlgebraSeq(IdsStore& store,
+                      const std::string& s,
+                      size_t i,
+                      const std::string& mode,
+                      bool stop_at_rparen,
+                      AlgebraEvalState* st) {
+  char op = '+';
+  while (i < s.size()) {
+    char c = s[i];
+    if (c == ')') {
+      if (stop_at_rparen)
+        ++i;
+      break;
+    }
+    if (c == '(') {
+      AlgebraEvalState inner;
+      size_t next = EvalAlgebraSeq(store, s, i + 1, mode, true, &inner);
+      MergeEvalGroup(store, st, op, inner);
+      if (op == '!')
+        op = '+';
+      i = next;
+      continue;
+    }
+    if (c == '+' || c == '-' || c == '!') {
+      op = c;
+      ++i;
+      continue;
+    }
+    if (IsEvalSeparator(c)) {
+      ++i;
+      continue;
+    }
+    size_t start = i;
+    while (i < s.size() && s[i] != '+' && s[i] != '-' && s[i] != '!' &&
+           s[i] != '(' && s[i] != ')' && !IsEvalSeparator(s[i]))
+      ++i;
+    std::string item = s.substr(start, i - start);
+    if (item.empty())
+      continue;
+    if (IsAsciiAlphaOnly(item)) {
+      ApplyEvalItem(store, st, op, item, mode);
+      if (op == '!')
+        op = '+';
+    } else {
+      for (const auto& ch : Utf8Chars(item)) {
+        ApplyEvalItem(store, st, op, ch, mode);
+        if (op == '!')
+          op = '+';
+      }
+    }
+  }
+  return i;
+}
+
+}  // namespace
+
+bool EvaluateAlgebraExpression(IdsStore& store,
+                               const std::string& expression,
+                               const std::string& mode,
+                               AlgebraEvaluation* out) {
+  if (!out)
+    return false;
+  AlgebraEvalState st;
+  EvalAlgebraSeq(store, expression, 0, mode, false, &st);
+  out->components = std::move(st.components);
+  out->excludes = std::move(st.excludes);
+  return true;
+}
+
 std::vector<uint32_t> SearchHybrid(IdsStore& store,
                                    const std::vector<std::string>& components,
                                    const std::string& mode,

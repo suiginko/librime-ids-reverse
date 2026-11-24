@@ -24,6 +24,7 @@
 #include <rime/translation.h>
 
 #include "ids_reverse_config.h"
+#include "ids_reverse_group.h"
 #include "ids_reverse_search.h"
 #include "ids_store.h"
 
@@ -188,9 +189,10 @@ std::string FormatIds(const std::string& raw_ids, const std::string& format) {
     if (cp >= 0x2FF0 && cp <= 0x2FFF) {
       if (format == "bracket") {
         static const char* kIdcLabels[] = {
-            "[左右]", "[上下]", "[左中右]", "[上中下]", "[全包]",   "[上包]",
-            "[下包]", "[左包]", "[左上包]", "[右上包]", "[左下包]", "[交叉]",
-            "[右包]", "[右下包]", "[水平翻转]", "[旋转]"};
+            "[左右]",   "[上下]",   "[左中右]",   "[上中下]",
+            "[全包]",   "[上包]",   "[下包]",     "[左包]",
+            "[左上包]", "[右上包]", "[左下包]",   "[交叉]",
+            "[右包]",   "[右下包]", "[水平翻转]", "[旋转]"};
         out += kIdcLabels[cp - 0x2FF0];
       } else if (format == "plain") {
         // 直接省略 IDC 结构字符
@@ -2201,6 +2203,22 @@ rime::an<rime::Translation> IdsReverseTranslator::QueryHybrid(
       BuildVariantCandidates(store, base_id, base, preedit, segment,
                              translation.get());
     }
+  } else if (has_component && ParseSingleGroup(pending).valid) {
+    // 括号编辑：只消歧最后一个拼音段，选中后由 processor 写回 pending。
+    size_t run_start = 0, run_end = 0;
+    if (FindLastAsciiRun(pending, &run_start, &run_end)) {
+      std::string run = pending.substr(run_start, run_end - run_start);
+      std::vector<std::string> tokens =
+          SegmentAlphaString(store, run, PinyinMode());
+      if (tokens.size() >= 2) {
+        BuildMultiComponentCandidates(store, tokens, segment,
+                                      translation.get());
+      } else if (tokens.size() == 1) {
+        std::vector<uint32_t> results =
+            GetComponentCandidates(store, tokens[0], PinyinMode(), 80);
+        BuildComponentCandidates(store, results, segment, translation.get());
+      }
+    }
   } else if ((pending.empty() || pending == "-" || pending == "+" ||
               pending == "!") &&
              !st.components.empty()) {
@@ -2218,7 +2236,7 @@ rime::an<rime::Translation> IdsReverseTranslator::QueryHybrid(
                                     translation.get());
     } else if (parsed.valid && parsed.tokens.size() == 1) {
       if (!IsAsciiAlphaOnly(parsed.tokens[0])) {
-        // 直接输入单个汉字时，不依赖 echo_translator。
+        // pending 中已有单个汉字（由选中部件写回）。
         auto cand =
             rime::New<rime::SimpleCandidate>("hanzi_component", segment.start,
                                              segment.end, parsed.tokens[0], "");

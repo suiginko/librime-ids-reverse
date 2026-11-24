@@ -27,6 +27,17 @@ std::vector<uint32_t> GetComponentCandidates(IdsStore& store,
                                              const std::string& mode,
                                              size_t limit);
 
+// 只计算括号表达式中的部件代数（+ / - / !、嵌套括号），不查词典。
+struct AlgebraEvaluation {
+  std::vector<std::string> components;
+  std::vector<std::string> excludes;
+};
+
+bool EvaluateAlgebraExpression(IdsStore& store,
+                               const std::string& expression,
+                               const std::string& mode,
+                               AlgebraEvaluation* out);
+
 }  // namespace ids_reverse
 
 #endif  // RIME_IDS_REVERSE_IDS_REVERSE_SEARCH_H_
