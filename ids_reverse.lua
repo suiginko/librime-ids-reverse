@@ -4641,7 +4641,7 @@ local function processor_func(key_event, env)
                       or gtype == "ids_reverse" or gtype == "hanzi_result"
     local is_single_component = (otype == "hanzi_component"
                                  or gtype == "hanzi_component"
-                                 or is_component_text(cand.text, 1))
+                                 or is_component_expression(cand.text, 1))
                                 and utf8_length(cand.text) == 1
     if not is_result and not is_single_component then
       ctx:set_property(VARIANTS_PROPERTY, "")
