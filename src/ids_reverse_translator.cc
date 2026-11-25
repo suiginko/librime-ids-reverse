@@ -1971,15 +1971,15 @@ void IdsReverseTranslator::BuildResultCandidates(
     if (config_.has_sw_block)
       show_block = ctx->get_option("show_block");
   }
-  std::string preedit = "\t";
+  std::string preedit = "\xe2\x80\x8b";
   if (ctx && segment.end > segment.start &&
       segment.end <= static_cast<int>(ctx->input().size())) {
     std::string seg_text =
         ctx->input().substr(segment.start, segment.end - segment.start);
-    if (!seg_text.empty())
-      preedit = seg_text + "\t";
+    if (!seg_text.empty() && seg_text != "'")
+      preedit = seg_text;
   } else if (!pending.empty()) {
-    preedit = pending + "\t";
+    preedit = pending;
   }
 
   for (uint32_t id : results) {
@@ -2225,7 +2225,7 @@ rime::an<rime::Translation> IdsReverseTranslator::QueryHybrid(
     }
     // 部件形式的状态末尾带有分隔引号，用空 preedit 隐藏它；
     // raw 表达式形式则保留原始输入作为 preedit。
-    std::string preedit = pending.empty() ? "\t" : std::string();
+    std::string preedit = pending.empty() ? "\xe2\x80\x8b" : std::string();
     auto cand = rime::New<rime::SimpleCandidate>("ids_reverse", segment.start,
                                                  segment.end, variant_result,
                                                  comment, preedit);
@@ -2245,9 +2245,9 @@ rime::an<rime::Translation> IdsReverseTranslator::QueryHybrid(
       // 若基准字已由前一段显示（O艹癸 → /），则只显示触发符。
       const std::string query =
           pending.substr(0, pending.size() - config_.variant_trigger.size());
-      std::string preedit = config_.variant_trigger + "\t";
+      std::string preedit = config_.variant_trigger;
       if (!query.empty())
-        preedit = base + config_.variant_trigger + "\t";
+        preedit = base + config_.variant_trigger;
       BuildVariantCandidates(store, base_id, base, preedit, segment,
                              translation.get());
     }

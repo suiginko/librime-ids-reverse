@@ -4105,14 +4105,14 @@ end
 local function build_result_candidates(store, results, segment, pending,
                                        config, ctx)
   local show_pinyin, show_ids, show_unicode, show_block = show_options(config, ctx)
-  local preedit = "\t"
+  local preedit = "\226\128\139"
   if ctx and segment._end > segment.start and segment._end <= #ctx.input then
     local seg_text = ctx.input:sub(segment.start + 1, segment._end)
-    if seg_text ~= "" then
-      preedit = seg_text .. "\t"
+    if seg_text ~= "" and seg_text ~= "'" then
+      preedit = seg_text
     end
   elseif pending ~= "" then
-    preedit = pending .. "\t"
+    preedit = pending
   end
   for _, id in ipairs(results) do
     local text = cp_to_utf8(store:cp_of_id(id))
@@ -4336,7 +4336,7 @@ local function query_hybrid(segment, env)
       comment = build_comment(store, id, show_pinyin, show_ids, show_unicode,
                               show_block, env.config.ids_format)
     end
-    local preedit = pending == "" and "\t" or ""
+    local preedit = pending == "" and "\226\128\139" or ""
     local cand = Candidate("ids_reverse", segment.start, segment._end,
                            variant_result, comment)
     cand.preedit = preedit
@@ -4351,9 +4351,9 @@ local function query_hybrid(segment, env)
       local cp = decode_next(base, 0)
       local base_id = cp ~= 0 and store:id_of_cp(cp) or INVALID_ID
       local query = pending:sub(1, #pending - #env.config.variant_trigger)
-      local preedit = env.config.variant_trigger .. "\t"
+      local preedit = env.config.variant_trigger
       if query ~= "" then
-        preedit = base .. env.config.variant_trigger .. "\t"
+        preedit = base .. env.config.variant_trigger
       end
       build_variant_candidates(store, base_id, base, preedit, segment,
                                env.config, ctx)
