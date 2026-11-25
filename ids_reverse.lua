@@ -4463,6 +4463,16 @@ local function filter_func(input, env)
     return
   end
 
+  local st = read_hybrid_state(ctx, env.config.hybrid.prefix)
+  local group = parse_single_group(st.pending)
+  if group and group.valid then
+    local run_start, run_end = find_last_ascii_run(st.pending)
+    if not run_start then
+      -- 括号内无未完成的拼音，不展示任何杂项候选
+      return
+    end
+  end
+
   local seen = {}
   local scanned = 0
   for cand in input:iter() do
