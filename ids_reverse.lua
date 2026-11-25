@@ -561,6 +561,15 @@ function Store:hot_block(id)
   return self.blob:byte(self.hot_off + id * 24 + 12) or 0
 end
 
+function Store:hot_score_fields(id)
+  local hit = self.hot_cache[id]
+  if hit then
+    return hit.freq, hit.flags, hit.char_token, hit.depth, hit.alts_off
+  end
+  if id >= self.num_chars then return 0, 0, NO_TOKEN, 0, 0 end
+  return string.unpack("<I4I4I2I1xI4", self.blob, self.hot_off + id * 24 + 1)
+end
+
 function Store:hot(id)
   if id >= self.num_chars then
     return { freq = 0, flags = 0, char_token = NO_TOKEN, depth = 0,
@@ -2097,34 +2106,101 @@ local function check_direct_match(store, alts_off, total, matchers,
   return best
 end
 
-local function score_candidate(store, id, matchers, order_count)
-  local h = store:hot(id)
-  local freq = h.freq
-  local depth = h.depth
+local function compute_match_sig(matchers)
+  local all_singleton = true
+  for i = 1, #matchers do
+    if #matchers[i].list ~= 1 then all_singleton = false; break end
+  end
+  local target_sig = 2166136261
+  if all_singleton then
+    for i = 1, #matchers do
+      local v = matchers[i].list[1]
+      target_sig = target_sig ~ (v & 0xFF)
+      target_sig = (target_sig * 16777619) & 0xFFFFFFFF
+      target_sig = target_sig ~ ((v >> 8) & 0xFF)
+      target_sig = (target_sig * 16777619) & 0xFFFFFFFF
+    end
+  end
+  return all_singleton, target_sig
+end
+
+local function top_k_ids(ids, scores, n, k)
+  if n == 0 or k <= 0 then return {} end
+  if n <= k then
+    local idx = {}
+    for i = 1, n do idx[i] = i end
+    table.sort(idx, function(a, b)
+      local sa, sb = scores[a], scores[b]
+      if sa ~= sb then return sa > sb end
+      return a < b
+    end)
+    local out = {}
+    for i = 1, n do out[i] = ids[idx[i]] end
+    return out
+  end
+  -- 最小堆维护 Top-K（堆顶为当前第 K 大），分数相同时索引更小者优先保留
+  local h_id, h_sc, h_ord = {}, {}, {}
+  local function less(i, sc, ord)
+    local si = h_sc[i]
+    if si ~= sc then return si < sc end
+    return h_ord[i] > ord
+  end
+  local function sift_down(p)
+    while true do
+      local l = p * 2
+      if l > k then break end
+      local c = l
+      local r = l + 1
+      if r <= k and less(r, h_sc[l], h_ord[l]) then c = r end
+      if less(c, h_sc[p], h_ord[p]) then
+        h_id[p], h_id[c] = h_id[c], h_id[p]
+        h_sc[p], h_sc[c] = h_sc[c], h_sc[p]
+        h_ord[p], h_ord[c] = h_ord[c], h_ord[p]
+        p = c
+      else
+        break
+      end
+    end
+  end
+  for i = 1, k do
+    h_id[i], h_sc[i], h_ord[i] = ids[i], scores[i], i
+  end
+  for i = k >> 1, 1, -1 do sift_down(i) end
+  for i = k + 1, n do
+    local sc = scores[i]
+    local top_sc = h_sc[1]
+    if sc > top_sc or (sc == top_sc and i < h_ord[1]) then
+      h_id[1], h_sc[1], h_ord[1] = ids[i], sc, i
+      sift_down(1)
+    end
+  end
+  local idx = {}
+  for i = 1, k do idx[i] = i end
+  table.sort(idx, function(a, b)
+    local sa, sb = h_sc[a], h_sc[b]
+    if sa ~= sb then return sa > sb end
+    return h_ord[a] < h_ord[b]
+  end)
+  local out = {}
+  for i = 1, k do out[i] = h_id[idx[i]] end
+  return out
+end
+
+local function score_candidate(store, id, matchers, order_count,
+                               all_singleton, target_sig)
+  local freq, flags, char_token, depth, alts_off = store:hot_score_fields(id)
   local total = #matchers
   if order_count == 1 and total == 1 then
-    local ct = h.char_token
-    if ct ~= NO_TOKEN and matcher_has(matchers[1], ct) then
+    if char_token ~= NO_TOKEN and matcher_has(matchers[1], char_token) then
       return 30000000 + freq
     end
   end
   local mt = 0
-  if total >= 1 and total <= 31 and (h.flags & (1 << total)) ~= 0 then
-    local all_singleton = true
-    for _, m in ipairs(matchers) do
-      if #m.list ~= 1 then all_singleton = false; break end
+  if total >= 1 and total <= 31 and (flags & (1 << total)) ~= 0 then
+    if all_singleton == nil then
+      all_singleton, target_sig = compute_match_sig(matchers)
     end
-    local target_sig = 2166136261
-    if all_singleton then
-      for _, m in ipairs(matchers) do
-        local v = m.list[1]
-        target_sig = target_sig ~ (v & 0xFF)
-        target_sig = (target_sig * 16777619) & 0xFFFFFFFF
-        target_sig = target_sig ~ ((v >> 8) & 0xFF)
-        target_sig = (target_sig * 16777619) & 0xFFFFFFFF
-      end
-    end
-    mt = check_direct_match(store, h.alts_off, total, matchers,
+    mt = check_direct_match(store, alts_off, total, matchers,
                             all_singleton, target_sig)
   end
   local common_bonus = freq >= 1900000 and 5000000 or 0
@@ -2421,6 +2497,76 @@ local function merge_exact_first(exact, broad)
   return merged, exact_set
 end
 
+local function bitmap_intersect_words(store, term_words, disabled_blocks)
+  local words_count = (store.num_chars + 63) >> 6
+  local num_chars = store.num_chars
+  local n_terms = #term_words
+  local all_single = true
+  for i = 1, n_terms do
+    if #term_words[i] ~= 1 then all_single = false; break end
+  end
+  local result = {}
+  local function emit_word(acc, w)
+    local base_id = (w - 1) * 64
+    while acc ~= 0 do
+      local lsb = acc & -acc
+      local id = base_id + ctz64(lsb)
+      if id < num_chars then
+        if not disabled_blocks or not disabled_blocks[store:hot_block(id)] then
+          result[#result + 1] = id
+        end
+      end
+      acc = acc ~ lsb
+    end
+  end
+
+  if all_single then
+    if n_terms == 2 then
+      local w1, w2 = term_words[1][1], term_words[2][1]
+      for w = 1, words_count do
+        local acc = w1[w] & w2[w]
+        if acc ~= 0 then emit_word(acc, w) end
+      end
+    elseif n_terms == 3 then
+      local w1, w2, w3 = term_words[1][1], term_words[2][1], term_words[3][1]
+      for w = 1, words_count do
+        local acc = w1[w] & w2[w] & w3[w]
+        if acc ~= 0 then emit_word(acc, w) end
+      end
+    else
+      local s1 = term_words[1][1]
+      for w = 1, words_count do
+        local acc = s1[w]
+        if acc ~= 0 then
+          for i = 2, n_terms do
+            acc = acc & term_words[i][1][w]
+            if acc == 0 then break end
+          end
+          if acc ~= 0 then emit_word(acc, w) end
+        end
+      end
+    end
+    return result
+  end
+
+  for w = 1, words_count do
+    local tw1 = term_words[1]
+    local acc = tw1[1][w]
+    for j = 2, #tw1 do acc = acc | tw1[j][w] end
+    if acc ~= 0 then
+      for i = 2, n_terms do
+        local twi = term_words[i]
+        local v = twi[1][w]
+        for j = 2, #twi do v = v | twi[j][w] end
+        acc = acc & v
+        if acc == 0 then break end
+      end
+      if acc ~= 0 then emit_word(acc, w) end
+    end
+  end
+  return result
+end
+
 local function search_components(store, query_str, max_results, codec,
                                  disabled_blocks)
   if query_str == "" then return {} end
@@ -2454,22 +2600,24 @@ local function search_components(store, query_str, max_results, codec,
       cache_put(query_cache, cache_key, {}, 256)
       return {}
     end
-    local scored = {}
-    for _, id in ipairs(cands) do
-      local sc = score_candidate(store, id, matchers, order_count)
+    local all_singleton, target_sig = compute_match_sig(matchers)
+    local n_cands = #cands
+    local scores = {}
+    for i = 1, n_cands do
+      local id = cands[i]
+      local sc = score_candidate(store, id, matchers, order_count,
+                                 all_singleton, target_sig)
       if pq.counts[term] == 1 and #matchers == 1 and direct_rank then
         local cp = store:cp_of_id(id)
         local r = direct_rank[cp]
         if r then
-          sc = 40000000 + store:hot(id).freq - r * 10
+          sc = 40000000 + store:hot_freq(id) - r * 10
         end
       end
       if exact_set[id] then sc = boost_exact_structure(sc) end
-      scored[#scored + 1] = { id = id, score = sc }
+      scores[i] = sc
     end
-    table.sort(scored, function(a, b) return a.score > b.score end)
-    local results = {}
-    for i = 1, math.min(#scored, max_results) do results[i] = scored[i].id end
+    local results = top_k_ids(cands, scores, n_cands, max_results)
     cache_put(query_cache, cache_key, results, 256)
     return results
   end
@@ -2520,8 +2668,6 @@ local function search_components(store, query_str, max_results, codec,
 
   local current
   if not has_any_pref and all_bitmap and #term_entries == #terms_info then
-    local words_count = (store.num_chars + 63) >> 6
-    local num_chars = store.num_chars
     local term_words = {}
     for i = 1, #term_entries do
       local tw = {}
@@ -2530,35 +2676,7 @@ local function search_components(store, query_str, max_results, codec,
       end
       term_words[i] = tw
     end
-    current = {}
-    local n_terms = #term_words
-    for w = 1, words_count do
-      local tw1 = term_words[1]
-      local acc = tw1[1][w]
-      for j = 2, #tw1 do acc = acc | tw1[j][w] end
-      if acc ~= 0 then
-        for i = 2, n_terms do
-          local twi = term_words[i]
-          local v = twi[1][w]
-          for j = 2, #twi do v = v | twi[j][w] end
-          acc = acc & v
-          if acc == 0 then break end
-        end
-        if acc ~= 0 then
-          local base_id = (w - 1) * 64
-          while acc ~= 0 do
-            local lsb = acc & -acc
-            local id = base_id + ctz64(lsb)
-            if id < num_chars then
-              if not disabled_blocks or not disabled_blocks[store:hot_block(id)] then
-                current[#current + 1] = id
-              end
-            end
-            acc = acc ~ lsb
-          end
-        end
-      end
-    end
+    current = bitmap_intersect_words(store, term_words, disabled_blocks)
   else
     if has_any_pref then
       current = get_candidates_for_term(store, base.term, base.mult, 1500,
@@ -2619,15 +2737,17 @@ local function search_components(store, query_str, max_results, codec,
   local exact_count = 0
   for _ in pairs(exact_set) do exact_count = exact_count + 1 end
   score_limit = score_limit + exact_count
-  local scored = {}
-  for i = 1, math.min(#current, score_limit) do
-    local sc = score_candidate(store, current[i], matchers, order_count)
-    if exact_set[current[i]] then sc = boost_exact_structure(sc) end
-    scored[#scored + 1] = { id = current[i], score = sc }
+  local n_score = math.min(#current, score_limit)
+  local all_singleton, target_sig = compute_match_sig(matchers)
+  local scores = {}
+  for i = 1, n_score do
+    local id = current[i]
+    local sc = score_candidate(store, id, matchers, order_count,
+                               all_singleton, target_sig)
+    if exact_set[id] then sc = boost_exact_structure(sc) end
+    scores[i] = sc
   end
-  table.sort(scored, function(a, b) return a.score > b.score end)
-  local results = {}
-  for i = 1, math.min(#scored, max_results) do results[i] = scored[i].id end
+  local results = top_k_ids(current, scores, n_score, max_results)
   cache_put(query_cache, cache_key, results, 256)
   return results
 end
@@ -2803,8 +2923,6 @@ local function intersect_postings(store, terms, counts)
   end
 
   if all_bitmap then
-    local words_count = (store.num_chars + 63) >> 6
-    local num_chars = store.num_chars
     local term_words = {}
     for i = 1, #term_keys do
       local entries = term_keys[i].entries
@@ -2814,38 +2932,7 @@ local function intersect_postings(store, terms, counts)
       end
       term_words[i] = tw
     end
-    local result = {}
-    local n_terms = #term_words
-    for w = 1, words_count do
-      local tw1 = term_words[1]
-      local acc = tw1[1][w]
-      for j = 2, #tw1 do
-        acc = acc | tw1[j][w]
-      end
-      if acc ~= 0 then
-        for i = 2, n_terms do
-          local twi = term_words[i]
-          local v = twi[1][w]
-          for j = 2, #twi do
-            v = v | twi[j][w]
-          end
-          acc = acc & v
-          if acc == 0 then break end
-        end
-        if acc ~= 0 then
-          local base_id = (w - 1) * 64
-          while acc ~= 0 do
-            local lsb = acc & -acc
-            local id = base_id + ctz64(lsb)
-            if id < num_chars then
-              result[#result + 1] = id
-            end
-            acc = acc ~ lsb
-          end
-        end
-      end
-    end
-    return result
+    return bitmap_intersect_words(store, term_words, nil)
   end
 
   local result = {}
@@ -3109,21 +3196,17 @@ local function rank_hybrid_strings(store, cands, normalized, exact_ids,
   end
 
   local limit = math.min(#cands, score_limit or 500)
-  local scored = {}
+  local scores = {}
   for i = 1, limit do
-    local sc = score_hybrid_strings(store, cands[i], norm_input, user_atomics,
+    local id = cands[i]
+    local sc = score_hybrid_strings(store, id, norm_input, user_atomics,
                                     user_atomic_seq, cache)
-    if exact_ids and exact_ids[cands[i]] then
+    if exact_ids and exact_ids[id] then
       sc = boost_exact_structure(sc)
     end
-    scored[#scored + 1] = { id = cands[i], score = sc, index = i }
+    scores[i] = sc
   end
-  table.sort(scored, function(a, b)
-    if a.score ~= b.score then return a.score > b.score end
-    return a.index < b.index
-  end)
-  local out = {}
-  for _, it in ipairs(scored) do out[#out + 1] = it.id end
+  local out = top_k_ids(cands, scores, limit, limit)
   for i = limit + 1, #cands do out[#out + 1] = cands[i] end
   return out
 end
@@ -3135,20 +3218,16 @@ local function rank_hybrid(store, cands, normalized, exact_ids, score_limit)
     return rank_hybrid_strings(store, cands, normalized, exact_ids, score_limit)
   end
   local limit = math.min(#cands, score_limit or 500)
-  local scored = {}
+  local scores = {}
   for i = 1, limit do
-    local sc = score_hybrid_tokens(store, cands[i], q)
-    if exact_ids and exact_ids[cands[i]] then
+    local id = cands[i]
+    local sc = score_hybrid_tokens(store, id, q)
+    if exact_ids and exact_ids[id] then
       sc = boost_exact_structure(sc)
     end
-    scored[#scored + 1] = { id = cands[i], score = sc, index = i }
+    scores[i] = sc
   end
-  table.sort(scored, function(a, b)
-    if a.score ~= b.score then return a.score > b.score end
-    return a.index < b.index
-  end)
-  local out = {}
-  for _, it in ipairs(scored) do out[#out + 1] = it.id end
+  local out = top_k_ids(cands, scores, limit, limit)
   for i = limit + 1, #cands do out[#out + 1] = cands[i] end
   return out
 end
