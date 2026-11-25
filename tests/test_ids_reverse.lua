@@ -369,15 +369,15 @@ for i, cand in ipairs(emitted) do combo[i] = cand.text end
 combo_text = table.concat(combo, " ")
 ok(contains(combo_text, "木木"), "Omumu 生成 木木 组合候选")
 
-local paren_flypy = I.parse_pending_components(store, "-(uv", "flypy")
+local paren_flypy = I.parse_pending_components(store, "-(uv", flypy)
 ok(paren_flypy.valid and #paren_flypy.tokens == 1 and paren_flypy.tokens[1] == "shui",
    "括号 pending 小鹤双拼 -(uv -> shui")
 
-local paren_quanpin = I.parse_pending_components(store, "-(shui", "quanpin")
+local paren_quanpin = I.parse_pending_components(store, "-(shui", full)
 ok(paren_quanpin.valid and #paren_quanpin.tokens == 1 and paren_quanpin.tokens[1] == "shui",
    "括号 pending 全拼 -(shui -> shui")
 
-local paren_multi = I.parse_pending_components(store, "-(shuishao)", "quanpin")
+local paren_multi = I.parse_pending_components(store, "-(shuishao)", full)
 ok(paren_multi.valid and #paren_multi.tokens == 2 and paren_multi.tokens[1] == "shui"
    and paren_multi.tokens[2] == "shao", "括号 pending 全拼 -(shuishao) -> shui shao")
 

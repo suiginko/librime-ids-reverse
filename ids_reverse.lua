@@ -359,6 +359,38 @@ end
 
 local TOKEN_ARRAY_FORMAT = {}
 local U32_ARRAY_FORMAT = {}
+local U64_ARRAY_FORMAT = {}
+
+local BYTE_CTZ = {}
+for i = 1, 255 do
+  local b, tz = i, 0
+  while (b & 1) == 0 do
+    b = b >> 1
+    tz = tz + 1
+  end
+  BYTE_CTZ[i] = tz
+end
+
+local function ctz64(lsb)
+  local lo = lsb & 0xFFFFFFFF
+  if lo ~= 0 then
+    local b = lo & 0xFF
+    if b ~= 0 then return BYTE_CTZ[b] end
+    b = (lo >> 8) & 0xFF
+    if b ~= 0 then return 8 + BYTE_CTZ[b] end
+    b = (lo >> 16) & 0xFF
+    if b ~= 0 then return 16 + BYTE_CTZ[b] end
+    return 24 + BYTE_CTZ[(lo >> 24) & 0xFF]
+  end
+  local hi = (lsb >> 32) & 0xFFFFFFFF
+  local b = hi & 0xFF
+  if b ~= 0 then return 32 + BYTE_CTZ[b] end
+  b = (hi >> 8) & 0xFF
+  if b ~= 0 then return 40 + BYTE_CTZ[b] end
+  b = (hi >> 16) & 0xFF
+  if b ~= 0 then return 48 + BYTE_CTZ[b] end
+  return 56 + BYTE_CTZ[(hi >> 24) & 0xFF]
+end
 
 local function array_format(cache, n, unit)
   local fmt = cache[n]
@@ -513,6 +545,20 @@ end
 function Store:cp_of_id(id)
   if id >= self.num_chars then return 0 end
   return rd32(self.blob, self.id2cp_off + id * 4)
+end
+
+function Store:hot_freq(id)
+  local hit = self.hot_cache[id]
+  if hit then return hit.freq end
+  if id >= self.num_chars then return 0 end
+  return rd32(self.blob, self.hot_off + id * 24)
+end
+
+function Store:hot_block(id)
+  local hit = self.hot_cache[id]
+  if hit then return hit.block end
+  if id >= self.num_chars then return 0 end
+  return self.blob:byte(self.hot_off + id * 24 + 12) or 0
 end
 
 function Store:hot(id)
@@ -816,6 +862,31 @@ function Store:head_ids(entry, count)
   return out
 end
 
+function Store:get_words(entry)
+  local w = entry._words
+  if w then return w end
+  w = {}
+  local words_count = (self.num_chars + 63) >> 6
+  local pos = self.post_off + entry.full_off
+  local remaining = words_count
+  local idx = 0
+  local chunk = 256
+  local blob = self.blob
+  while remaining > 0 do
+    local n = remaining < chunk and remaining or chunk
+    local values = { string.unpack(array_format(U64_ARRAY_FORMAT, n, "I8"),
+                                   blob, pos + 1) }
+    for i = 1, n do
+      idx = idx + 1
+      w[idx] = values[i]
+    end
+    pos = pos + n * 8
+    remaining = remaining - n
+  end
+  entry._words = w
+  return w
+end
+
 function Store:full_contains(entry, id)
   if entry.kind == 0 then
     local lo, hi = 0, entry.full_cnt - 1
@@ -827,6 +898,11 @@ function Store:full_contains(entry, id)
       if v < id then lo = mid + 1 else hi = mid - 1 end
     end
     return false
+  end
+  local w = entry._words
+  if w then
+    local word = w[(id >> 6) + 1]
+    return word ~= nil and ((word >> (id & 63)) & 1) ~= 0
   end
   local base = self.post_off + entry.full_off
   local word = rd64(self.blob, base + (id >> 6) * 8)
@@ -1362,7 +1438,28 @@ do
       elseif op == "derive" and parts[4] == "correction" then
         cred = SPELL_CORRECTION_PENALTY
       end
-      return { kind = kind, ast = compile_pattern(parts[2]), repl = parts[3],
+      local fast_kind, fast_pat, fast_repl
+      if not deletion then
+        local pat, repl = parts[2], parts[3]
+        local p_pref = pat:match("^%^([a-zA-Z]+)$")
+        if p_pref and not repl:find("[%$%%]") then
+          fast_kind, fast_pat, fast_repl = "prefix", p_pref, repl
+        else
+          local p_suf = pat:match("^([a-zA-Z]+)%$$")
+          if p_suf and not repl:find("[%$%%]") then
+            fast_kind, fast_pat, fast_repl = "suffix", p_suf, repl
+          else
+            local p_csuf = pat:match("^%(%.%)([a-zA-Z]+)%$$")
+            local r_csuf = p_csuf and repl:match("^%$1([a-zA-Z]*)$")
+            if p_csuf and r_csuf then
+              fast_kind, fast_pat, fast_repl = "c_suffix", p_csuf, r_csuf
+            end
+          end
+        end
+      end
+      return { kind = kind, ast = fast_kind and nil or compile_pattern(parts[2]),
+               repl = parts[3], fast_kind = fast_kind, fast_pat = fast_pat,
+               fast_repl = fast_repl,
                type = typ, cred = cred, addition = addition,
                deletion = deletion }
     end
@@ -1425,6 +1522,27 @@ do
       return table.concat(out)
     elseif rule.kind == "reorder" then
       return apply_reorder(rule, key)
+    elseif rule.fast_kind == "prefix" then
+      local p = rule.fast_pat
+      if #key >= #p and key:sub(1, #p) == p then
+        local out = rule.fast_repl .. key:sub(#p + 1)
+        if out ~= key then return out end
+      end
+      return nil
+    elseif rule.fast_kind == "suffix" then
+      local p = rule.fast_pat
+      if #key >= #p and key:sub(-#p) == p then
+        local out = key:sub(1, #key - #p) .. rule.fast_repl
+        if out ~= key then return out end
+      end
+      return nil
+    elseif rule.fast_kind == "c_suffix" then
+      local p = rule.fast_pat
+      if #key > #p and key:sub(-#p) == p then
+        local out = key:sub(1, #key - #p) .. rule.fast_repl
+        if out ~= key then return out end
+      end
+      return nil
     elseif rule.erase then
       if regex_full(rule.ast, key) then return "" end
       return nil
@@ -2276,7 +2394,7 @@ local function lookup_exact_query(store, pq, disabled_blocks)
   if disabled_blocks then
     local filtered = {}
     for _, id in ipairs(ids) do
-      if not disabled_blocks[store:hot(id).block] then
+      if not disabled_blocks[store:hot_block(id)] then
         filtered[#filtered + 1] = id
       end
     end
@@ -2381,39 +2499,115 @@ local function search_components(store, query_str, max_results, codec,
   end
   if not base then return {} end
 
-  local current
-  if has_any_pref then
-    current = get_candidates_for_term(store, base.term, base.mult, 1500,
-                                      base.post_keys, disabled_blocks, true)
-  else
-    current = get_candidates_for_term_full(store, base, disabled_blocks)
+  local all_bitmap = true
+  local term_entries = {}
+  for i = 1, #terms_info do
+    local t = terms_info[i]
+    local entries = {}
+    for _, k in ipairs(t.post_keys) do
+      local e = store:find_key(k)
+      if e and e.full_cnt > 0 then
+        entries[#entries + 1] = e
+        if e.kind ~= 1 then all_bitmap = false end
+      end
+    end
+    if #entries == 0 then
+      all_bitmap = false
+      break
+    end
+    term_entries[i] = entries
   end
-  if #current == 0 then return {} end
 
-  for _, t in ipairs(terms_info) do
-    if #current == 0 then break end
-    if t ~= base then
-      local filtered = {}
-      for _, id in ipairs(current) do
-        local cs = store:comp_set(id)
-        local cn = #cs
-        local matched = false
-        local a, b = 1, 1
-        local toks = t.tokens
-        while a <= cn and b <= #toks do
-          if cs[a] == toks[b] then matched = true; break
-          elseif cs[a] < toks[b] then a = a + 1
-          else b = b + 1 end
+  local current
+  if not has_any_pref and all_bitmap and #term_entries == #terms_info then
+    local words_count = (store.num_chars + 63) >> 6
+    local num_chars = store.num_chars
+    local term_words = {}
+    for i = 1, #term_entries do
+      local tw = {}
+      for j = 1, #term_entries[i] do
+        tw[j] = store:get_words(term_entries[i][j])
+      end
+      term_words[i] = tw
+    end
+    current = {}
+    local n_terms = #term_words
+    for w = 1, words_count do
+      local tw1 = term_words[1]
+      local acc = tw1[1][w]
+      for j = 2, #tw1 do acc = acc | tw1[j][w] end
+      if acc ~= 0 then
+        for i = 2, n_terms do
+          local twi = term_words[i]
+          local v = twi[1][w]
+          for j = 2, #twi do v = v | twi[j][w] end
+          acc = acc & v
+          if acc == 0 then break end
         end
-        if not matched then
-          for _, k in ipairs(t.post_keys) do
-            local e = store:find_key(k)
-            if e and store:full_contains(e, id) then matched = true; break end
+        if acc ~= 0 then
+          local base_id = (w - 1) * 64
+          while acc ~= 0 do
+            local lsb = acc & -acc
+            local id = base_id + ctz64(lsb)
+            if id < num_chars then
+              if not disabled_blocks or not disabled_blocks[store:hot_block(id)] then
+                current[#current + 1] = id
+              end
+            end
+            acc = acc ~ lsb
           end
         end
-        if matched then filtered[#filtered + 1] = id end
       end
-      current = filtered
+    end
+  else
+    if has_any_pref then
+      current = get_candidates_for_term(store, base.term, base.mult, 1500,
+                                        base.post_keys, disabled_blocks, true)
+    else
+      current = get_candidates_for_term_full(store, base, disabled_blocks)
+    end
+    if #current == 0 then return {} end
+
+    for _, t in ipairs(terms_info) do
+      if #current == 0 then break end
+      if t ~= base then
+        local filtered = {}
+        local t_entries = {}
+        for _, k in ipairs(t.post_keys) do
+          local e = store:find_key(k)
+          if e then t_entries[#t_entries + 1] = e end
+        end
+        if not t.is_pref and #t_entries > 0 then
+          for _, id in ipairs(current) do
+            for j = 1, #t_entries do
+              if store:full_contains(t_entries[j], id) then
+                filtered[#filtered + 1] = id
+                break
+              end
+            end
+          end
+        else
+          for _, id in ipairs(current) do
+            local cs = store:comp_set(id)
+            local cn = #cs
+            local matched = false
+            local a, b = 1, 1
+            local toks = t.tokens
+            while a <= cn and b <= #toks do
+              if cs[a] == toks[b] then matched = true; break
+              elseif cs[a] < toks[b] then a = a + 1
+              else b = b + 1 end
+            end
+            if not matched then
+              for j = 1, #t_entries do
+                if store:full_contains(t_entries[j], id) then matched = true; break end
+              end
+            end
+            if matched then filtered[#filtered + 1] = id end
+          end
+        end
+        current = filtered
+      end
     end
   end
   local exact = lookup_exact_query(store, pq, disabled_blocks)
@@ -2596,6 +2790,64 @@ local function intersect_postings(store, terms, counts)
     end
   end
 
+  local all_bitmap = true
+  for i = 1, #term_keys do
+    local entries = term_keys[i].entries
+    for j = 1, #entries do
+      if entries[j].kind ~= 1 then
+        all_bitmap = false
+        break
+      end
+    end
+    if not all_bitmap then break end
+  end
+
+  if all_bitmap then
+    local words_count = (store.num_chars + 63) >> 6
+    local num_chars = store.num_chars
+    local term_words = {}
+    for i = 1, #term_keys do
+      local entries = term_keys[i].entries
+      local tw = {}
+      for j = 1, #entries do
+        tw[j] = store:get_words(entries[j])
+      end
+      term_words[i] = tw
+    end
+    local result = {}
+    local n_terms = #term_words
+    for w = 1, words_count do
+      local tw1 = term_words[1]
+      local acc = tw1[1][w]
+      for j = 2, #tw1 do
+        acc = acc | tw1[j][w]
+      end
+      if acc ~= 0 then
+        for i = 2, n_terms do
+          local twi = term_words[i]
+          local v = twi[1][w]
+          for j = 2, #twi do
+            v = v | twi[j][w]
+          end
+          acc = acc & v
+          if acc == 0 then break end
+        end
+        if acc ~= 0 then
+          local base_id = (w - 1) * 64
+          while acc ~= 0 do
+            local lsb = acc & -acc
+            local id = base_id + ctz64(lsb)
+            if id < num_chars then
+              result[#result + 1] = id
+            end
+            acc = acc ~ lsb
+          end
+        end
+      end
+    end
+    return result
+  end
+
   local result = {}
   local seed_seen = {}
   local need_dedup = #term_keys[seed_index].entries > 1
@@ -2758,7 +3010,7 @@ local function score_hybrid_tokens(store, id, q)
   else
     score = -missing_count * 5000000 - extra_count * 500000
   end
-  local block = store:hot(id).block
+  local block = store:hot_block(id)
   if block == 0 then score = score + 2000000
   elseif block == 1 then score = score + 1000000 end
   return score
@@ -2834,7 +3086,7 @@ local function score_hybrid_strings(store, id, normalized, user_atomics,
   else
     score = -missing_count * 5000000 - extra_count * 500000
   end
-  local block = store:hot(id).block
+  local block = store:hot_block(id)
   if block == 0 then score = score + 2000000
   elseif block == 1 then score = score + 1000000 end
   return score
@@ -3381,7 +3633,7 @@ local function lookup_exact_structure(store, normalized, disabled_blocks)
   if disabled_blocks then
     local filtered = {}
     for _, id in ipairs(ids) do
-      if not disabled_blocks[store:hot(id).block] then
+      if not disabled_blocks[store:hot_block(id)] then
         filtered[#filtered + 1] = id
       end
     end
@@ -3436,7 +3688,7 @@ local function search_by_leaves(store, leaves, codec, max_results,
   if disabled_blocks then
     local filtered = {}
     for _, id in ipairs(cands) do
-      if not disabled_blocks[store:hot(id).block] then
+      if not disabled_blocks[store:hot_block(id)] then
         filtered[#filtered + 1] = id
       end
     end
@@ -3561,7 +3813,7 @@ local function get_pinyin_candidates(store, pinyin, limit)
     end
   end
   table.sort(ids, function(a, b)
-    local fa, fb = store:hot(a).freq, store:hot(b).freq
+    local fa, fb = store:hot_freq(a), store:hot_freq(b)
     if fa ~= fb then return fa > fb end
     return a < b
   end)
@@ -3582,6 +3834,10 @@ local function get_component_candidates(store, raw_code, codec, limit)
   if code == "" then return {} end
   code = ascii_lower(code)
   if not is_ascii_alpha_only(code) then return {} end
+
+  local pkey = codec.id .. ":" .. code .. ":" .. tostring(limit or 0)
+  local phit = cache_get(prefix_cache, pkey)
+  if phit then return phit end
 
   -- 完整编码优先；否则按编码前缀展开（增量输入）。
   local lookups = codec:decode_exact(code)
@@ -3619,9 +3875,17 @@ local function get_component_candidates(store, raw_code, codec, limit)
     end
   end
 
-  if #ids == 0 then return {} end
+  if #ids == 0 then
+    cache_put(prefix_cache, pkey, {}, 128)
+    return {}
+  end
+  local freqs = {}
+  for i = 1, #ids do
+    local id = ids[i]
+    freqs[id] = store:hot_freq(id)
+  end
   table.sort(ids, function(a, b)
-    local fa, fb = store:hot(a).freq, store:hot(b).freq
+    local fa, fb = freqs[a], freqs[b]
     if fa ~= fb then return fa > fb end
     return a < b
   end)
@@ -3630,6 +3894,7 @@ local function get_component_candidates(store, raw_code, codec, limit)
     for i = 1, limit do r[i] = ids[i] end
     ids = r
   end
+  cache_put(prefix_cache, pkey, ids, 128)
   return ids
 end
 
@@ -4183,27 +4448,30 @@ local function processor_func(key_event, env)
   local ctx = env.engine.context
   if not ctx then return 2 end
 
+  if not is_reverse_active(ctx, env.config.hybrid.prefix) then
+    if not ctx:get_option("ascii_mode") and not ctx:is_composing() then
+      local ctrl, alt = key_event:ctrl(), key_event:alt()
+      if not ctrl and not alt then
+        local repr = key_event:repr()
+        if repr == env.config.search.prefix then
+          ctx:push_input(env.config.search.prefix)
+          return 1
+        end
+        if repr == env.config.hybrid.prefix then
+          ctx:push_input(env.config.hybrid.prefix)
+          enter_o_mode(ctx)
+          return 1
+        end
+      end
+    end
+    return 2
+  end
+
   if handle_ids_hotkey(key_event, ctx, env) then return 1 end
 
   local repr = key_event:repr()
   local code = key_event.keycode
   local ctrl, alt, shift = key_event:ctrl(), key_event:alt(), key_event:shift()
-
-  if not is_reverse_active(ctx, env.config.hybrid.prefix) then
-    if not ctx:get_option("ascii_mode") and not ctrl and not alt
-       and not ctx:is_composing() then
-      if repr == env.config.search.prefix then
-        ctx:push_input(env.config.search.prefix)
-        return 1
-      end
-      if repr == env.config.hybrid.prefix then
-        ctx:push_input(env.config.hybrid.prefix)
-        enter_o_mode(ctx)
-        return 1
-      end
-    end
-    return 2
-  end
 
   enter_o_mode(ctx)
 
@@ -5027,10 +5295,22 @@ end
 -- 导出
 -- ---------------------------------------------------------------------------
 
+local function filter_applies_to_segment(seg, env)
+  local ctx = env.engine.context
+  if not ctx or ctx:get_option("ascii_mode") then return false end
+  local inp = ctx.input or ""
+  return starts_with(inp, env.config.search.prefix)
+      or starts_with(inp, env.config.hybrid.prefix)
+end
+
 M.processor = { init = processor_init, func = processor_func, fini = processor_fini }
 M.segmentor = { init = segmentor_init, func = segmentor_func }
 M.translator = { init = translator_init, func = translator_func }
-M.filter = { init = filter_init, func = filter_func }
+M.filter = {
+  init = filter_init,
+  func = filter_func,
+  applies_to_segment = filter_applies_to_segment,
+}
 
 -- 供纯 Lua 测试使用的内部接口；不影响 Rime 组件。
 M._internal = {
