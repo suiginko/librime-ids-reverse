@@ -96,6 +96,9 @@ end
 local function hybrid(components, mode)
   return I.search_hybrid(store, components, mode or "quanpin", 60, nil)
 end
+local function rpn(components, mode)
+  return I.search_hybrid(store, components, mode or "quanpin", 60, nil, "rpn")
+end
 
 local wood_mouth = chars(search("木口"))
 ok(contains(wood_mouth, "杏"), "I 木口 包含 杏")
@@ -167,6 +170,26 @@ local grouped_excluded = chars(hybrid({ "木木", "!(口日)" }))
 ok(not contains(grouped_excluded, "啉"), "O 木木!(口日) 排除 啉")
 ok(not contains(grouped_excluded, "晽"), "O 木木!(口日) 排除 晽")
 
+-- 逆波兰后缀表达式
+local rpn_add = rpn({ "木", "木", "+" })
+ok(utf8.char(store:cp_of_id(rpn_add[1])) == "林", "RPN 木木+ 首选 林")
+local rpn_sub = rpn({ "森", "木", "-" })
+ok(utf8.char(store:cp_of_id(rpn_sub[1])) == "林", "RPN 森木- 首选 林")
+local rpn_chain = rpn({ "森", "木", "-", "氵", "+" })
+ok(utf8.char(store:cp_of_id(rpn_chain[1])) == "淋", "RPN 森木-氵+ 首选 淋")
+local rpn_zhang = rpn({ "章", "日", "-", "十", "-" })
+ok(utf8.char(store:cp_of_id(rpn_zhang[1])) == "立", "RPN 章日-十- 首选 立")
+local rpn_da = rpn({ "达", "大", "-" })
+ok(utf8.char(store:cp_of_id(rpn_da[1])) == "辶", "RPN 达大- 首选 辶")
+local rpn_excluded = chars(rpn({ "木", "木", "口", "!" }))
+ok(not contains(rpn_excluded, "啉"), "RPN 木木口! 排除 啉")
+local rpn_grouped_excluded = chars(rpn({ "木", "木", "口", "日", "+", "!" }))
+ok(not contains(rpn_grouped_excluded, "啉"), "RPN 木木口日+! 排除 啉")
+ok(not contains(rpn_grouped_excluded, "晽"), "RPN 木木口日+! 排除 晽")
+local rpn_miao = rpn({ "渺", "水", "少", "+", "-" })
+ok(utf8.char(store:cp_of_id(rpn_miao[1])) == "目", "RPN 渺水少+- 首选 目")
+ok(#rpn({ "木", "-" }) == 0, "RPN 运算符不足返回空")
+
 local group_steps = I.parse_algebra_steps({ "渺-(水少)" })
 ok(#group_steps == 3 and group_steps[1].item == "渺"
    and group_steps[1].op == "+"
@@ -195,6 +218,13 @@ ok(open_group and open_group.op == "-" and open_group.inner == "shui"
 local closed_group = I.parse_single_group("-(沐-木)")
 ok(closed_group and closed_group.op == "-" and closed_group.inner == "沐-木"
    and closed_group.closed, "识别已闭合括号表达式")
+
+-- 退格重新打开已闭合括号
+ok(I.reopen_closed_group("(沙-少)") == "(沙-少", "退格重开括号 (沙-少)")
+ok(I.reopen_closed_group("-(沙-少)") == "-(沙-少", "退格重开括号 -(沙-少)")
+ok(I.reopen_closed_group("((沙-少))") == "((沙-少)", "退格重开嵌套括号")
+ok(I.reopen_closed_group("沙-少") == nil, "普通文本不重开括号")
+ok(I.reopen_closed_group("-(沙-少") == nil, "未闭合括号不重开")
 
 local comps, excludes = I.evaluate_algebra_expression(store, "沐-木", "quanpin")
 ok(#comps == 1 and comps[1] == "氵" and #excludes == 0,

@@ -20,6 +20,10 @@ struct PendingGroup {
 
 PendingGroup ParseSingleGroup(const std::string& pending);
 
+// 若 code 是已闭合的单个括号表达式，返回去掉右括号后的文本。
+// 供退格重新打开括号编辑，而不是一次删除整个括号层。
+bool ReopenClosedGroup(const std::string& code, std::string* reopened);
+
 // 查找最后一个连续 ASCII 字母段；end 为开区间。
 bool FindLastAsciiRun(const std::string& s, size_t* start, size_t* end);
 

@@ -31,6 +31,8 @@ struct ReverseConfig {
   std::string data_path = "ids_data.bin";
   std::string custom_path;
   std::string shuangpin_scheme = "flypy";
+  // O 模式部件代数表示法：infix（中缀，默认）或 rpn（逆波兰后缀）。
+  std::string algebra_notation = "infix";
   std::string ids_format = "unicode";
   std::string variant_trigger = "/";
   std::string variant_replace_key = "Shift+V";
@@ -46,6 +48,10 @@ struct ReverseConfig {
   rime::hash_set<int> disabled_blocks;
   bool disabled_blocks_enabled = false;
 };
+
+inline bool IsRpnNotation(const ReverseConfig& config) {
+  return config.algebra_notation == "rpn";
+}
 
 // 混合检字过程中保存在 Context property 中的状态。
 constexpr char kHybridStateProperty[] = "ids_reverse_components";

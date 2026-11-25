@@ -1293,33 +1293,138 @@ bool EvaluateAlgebraExpression(IdsStore& store,
   return true;
 }
 
+namespace {
+
+struct RpnValue {
+  std::vector<std::string> components;
+  std::vector<std::string> excludes;
+  bool has_sub = false;
+  bool plus_after_sub = false;
+};
+
+// 逆波兰后缀求值。非运算符层先按中缀表达式解析为一个操作数，因此括号结果、
+// 多字组合部件等都能直接入栈。运算符栈不足时返回 false。
+bool EvaluateRpnComponents(IdsStore& store,
+                           const std::vector<std::string>& tokens,
+                           const std::string& mode,
+                           AlgebraEvaluation* out,
+                           bool* pure_sub,
+                           bool* has_sub) {
+  if (!out || !pure_sub || !has_sub)
+    return false;
+
+  std::vector<RpnValue> stack;
+  std::vector<std::string> global_excludes;
+
+  auto push_operand = [&](const std::string& text) {
+    AlgebraEvaluation value;
+    EvaluateAlgebraExpression(store, text, mode, &value);
+    RpnValue item;
+    item.components = std::move(value.components);
+    item.excludes = std::move(value.excludes);
+    stack.push_back(std::move(item));
+  };
+
+  for (const auto& token : tokens) {
+    if (token == "+" || token == "-") {
+      if (stack.size() < 2)
+        return false;
+      RpnValue b = std::move(stack.back());
+      stack.pop_back();
+      RpnValue a = std::move(stack.back());
+      stack.pop_back();
+      if (token == "+") {
+        if (a.has_sub || b.has_sub)
+          a.plus_after_sub = true;
+        a.has_sub = a.has_sub || b.has_sub;
+        a.plus_after_sub = a.plus_after_sub || b.plus_after_sub;
+        a.components.insert(a.components.end(), b.components.begin(),
+                            b.components.end());
+        a.excludes.insert(a.excludes.end(), b.excludes.begin(),
+                          b.excludes.end());
+      } else {
+        for (const auto& item : b.components)
+          a.components = ApplySingleSubtraction(store, a.components, item);
+        a.has_sub = true;
+        a.plus_after_sub = a.plus_after_sub || b.plus_after_sub;
+        a.excludes.insert(a.excludes.end(), b.excludes.begin(),
+                          b.excludes.end());
+      }
+      stack.push_back(std::move(a));
+    } else if (token == "!") {
+      if (stack.empty())
+        return false;
+      RpnValue value = std::move(stack.back());
+      stack.pop_back();
+      global_excludes.insert(global_excludes.end(), value.components.begin(),
+                             value.components.end());
+      global_excludes.insert(global_excludes.end(), value.excludes.begin(),
+                             value.excludes.end());
+    } else {
+      push_operand(token);
+    }
+  }
+
+  bool result_has_sub = false;
+  bool result_plus_after_sub = false;
+  out->components.clear();
+  for (const auto& value : stack) {
+    out->components.insert(out->components.end(), value.components.begin(),
+                           value.components.end());
+    global_excludes.insert(global_excludes.end(), value.excludes.begin(),
+                           value.excludes.end());
+    result_has_sub = result_has_sub || value.has_sub;
+    result_plus_after_sub = result_plus_after_sub || value.plus_after_sub;
+  }
+  out->excludes = std::move(global_excludes);
+  *has_sub = result_has_sub;
+  *pure_sub = (stack.size() == 1 && result_has_sub && !result_plus_after_sub);
+  return true;
+}
+
+}  // namespace
+
 std::vector<uint32_t> SearchHybrid(IdsStore& store,
                                    const std::vector<std::string>& components,
                                    const std::string& mode,
                                    size_t max_results,
-                                   const rime::hash_set<int>* disabled_blocks) {
+                                   const rime::hash_set<int>* disabled_blocks,
+                                   bool rpn) {
   if (components.empty())
     return {};
 
-  std::vector<AlgebraStep> steps = ParseAlgebraSteps(components);
   std::vector<std::string> current;
   std::vector<std::string> excludes;
   bool pure_sub = true;
   bool has_sub = false;
 
-  for (const auto& step : steps) {
-    std::string item = NormalizeAlgebraItem(store, step.item, mode);
-    if (item.empty())
-      continue;
-    if (step.op == '+') {
-      if (!current.empty() && has_sub)
-        pure_sub = false;
-      current.push_back(item);
-    } else if (step.op == '!') {
-      excludes.push_back(item);
-    } else {
-      has_sub = true;
-      current = ApplySingleSubtraction(store, current, item);
+  if (rpn) {
+    AlgebraEvaluation eval;
+    bool rpn_pure_sub = false;
+    bool rpn_has_sub = false;
+    if (!EvaluateRpnComponents(store, components, mode, &eval, &rpn_pure_sub,
+                               &rpn_has_sub))
+      return {};
+    current = std::move(eval.components);
+    excludes = std::move(eval.excludes);
+    pure_sub = rpn_pure_sub;
+    has_sub = rpn_has_sub;
+  } else {
+    std::vector<AlgebraStep> steps = ParseAlgebraSteps(components);
+    for (const auto& step : steps) {
+      std::string item = NormalizeAlgebraItem(store, step.item, mode);
+      if (item.empty())
+        continue;
+      if (step.op == '+') {
+        if (!current.empty() && has_sub)
+          pure_sub = false;
+        current.push_back(item);
+      } else if (step.op == '!') {
+        excludes.push_back(item);
+      } else {
+        has_sub = true;
+        current = ApplySingleSubtraction(store, current, item);
+      }
     }
   }
 

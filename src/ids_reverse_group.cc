@@ -53,6 +53,16 @@ PendingGroup ParseSingleGroup(const std::string& pending) {
   return out;
 }
 
+bool ReopenClosedGroup(const std::string& code, std::string* reopened) {
+  if (!reopened || code.empty() || code.back() != ')')
+    return false;
+  PendingGroup group = ParseSingleGroup(code);
+  if (!group.valid || !group.closed)
+    return false;
+  *reopened = code.substr(0, code.size() - 1);
+  return true;
+}
+
 bool FindLastAsciiRun(const std::string& s, size_t* start, size_t* end) {
   bool found = false;
   size_t last_start = 0;

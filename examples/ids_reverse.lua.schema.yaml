@@ -59,6 +59,7 @@ ids_reverse:
   custom_file: ids_custom.txt
   max_results: 60
   shuangpin_scheme: flypy
+  algebra_notation: infix   # infix（默认）| rpn
   show_pinyin: true
   show_ids: true
   show_unicode: true

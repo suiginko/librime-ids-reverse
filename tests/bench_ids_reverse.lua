@@ -76,6 +76,8 @@ local cases = {
   { "O 排除 木木!口", function() I.search_hybrid(store, { "木木", "!口" }, "quanpin", 60, nil) end },
   { "O 递归 章-日十", function() I.search_hybrid(store, { "章", "-日十" }, "quanpin", 60, nil) end },
   { "O 异体基准 艹亏", function() I.search_hybrid(store, { "艹", "亏" }, "quanpin", 60, nil) end },
+  { "O RPN 森木-氵+", function() I.search_hybrid(store, { "森", "木", "-", "氵", "+" }, "quanpin", 60, nil, "rpn") end },
+  { "O RPN 木木口!", function() I.search_hybrid(store, { "木", "木", "口", "!" }, "quanpin", 60, nil, "rpn") end },
   { "部件候选 mu", function() I.get_component_candidates(store, "mu", "quanpin", 80) end },
   { "部件候选 m", function() I.get_component_candidates(store, "m", "quanpin", 80) end },
 }

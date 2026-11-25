@@ -115,6 +115,7 @@ void LoadReverseConfig(const rime::Ticket& ticket,
   conf->GetString(ns + "/data_file", &config->data_path);
   conf->GetString(ns + "/custom_file", &config->custom_path);
   conf->GetString(ns + "/shuangpin_scheme", &config->shuangpin_scheme);
+  conf->GetString(ns + "/algebra_notation", &config->algebra_notation);
   conf->GetString(ns + "/ids_format", &config->ids_format);
   conf->GetString(ns + "/variant_trigger", &config->variant_trigger);
   conf->GetString(ns + "/variant_replace_key", &config->variant_replace_key);
@@ -147,6 +148,8 @@ void LoadReverseConfig(const rime::Ticket& ticket,
   if (config->shuangpin_scheme != "zrm" &&
       config->shuangpin_scheme != "quanpin")
     config->shuangpin_scheme = "flypy";
+  if (config->algebra_notation != "rpn")
+    config->algebra_notation = "infix";
   if (config->max_results <= 0)
     config->max_results = 60;
 

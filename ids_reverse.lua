@@ -9,6 +9,7 @@
 -- 直接读取 C++ 版使用的 IDS4 单文件数据 ids_data.bin。
 
 local M = {}
+M._rpn = {}
 
 -- ---------------------------------------------------------------------------
 -- 常量与通用工具
@@ -2789,6 +2790,14 @@ local function parse_single_group(pending)
   return { op = op, inner = pending:sub(open_pos + 1), closed = false }
 end
 
+-- 若 code 是已闭合的单个括号表达式，返回去掉右括号后的文本。
+function M._rpn.reopen_closed_group(code)
+  if code == "" or code:sub(-1) ~= ")" then return nil end
+  local group = parse_single_group(code)
+  if not group or not group.closed then return nil end
+  return code:sub(1, -2)
+end
+
 local function format_group_component(op, components, excludes)
   local out = table.concat(components)
   for _, e in ipairs(excludes) do out = out .. "!" .. e end
@@ -2880,6 +2889,81 @@ end
 local function evaluate_algebra_expression(store, expression, mode)
   local _, st = eval_algebra_seq(store, expression, 1, mode, false)
   return st.components, st.excludes
+end
+
+-- 逆波兰后缀求值。非运算符层先按中缀表达式解析为一个操作数，因此括号结果、
+-- 多字组合部件等都能直接入栈。返回 components, excludes, pure_sub, has_sub；
+-- 运算符栈不足时返回 nil。
+function M._rpn.evaluate(store, components, mode)
+  local stack = {}
+  local excludes = {}
+
+  local function push_operand(text)
+    local comps, ex = evaluate_algebra_expression(store, text, mode)
+    stack[#stack + 1] = {
+      components = comps,
+      excludes = ex,
+      has_sub = false,
+      plus_after_sub = false,
+    }
+  end
+
+  for _, token in ipairs(components) do
+    if token == "+" or token == "-" then
+      if #stack < 2 then return nil end
+      local b = table.remove(stack)
+      local a = table.remove(stack)
+      if token == "+" then
+        if a.has_sub or b.has_sub then a.plus_after_sub = true end
+        a.has_sub = a.has_sub or b.has_sub
+        a.plus_after_sub = a.plus_after_sub or b.plus_after_sub
+        for _, c in ipairs(b.components) do
+          a.components[#a.components + 1] = c
+        end
+        for _, e in ipairs(b.excludes) do
+          a.excludes[#a.excludes + 1] = e
+        end
+      else
+        for _, item in ipairs(b.components) do
+          a.components = apply_single_subtraction(store, a.components, item)
+        end
+        a.has_sub = true
+        a.plus_after_sub = a.plus_after_sub or b.plus_after_sub
+        for _, e in ipairs(b.excludes) do
+          a.excludes[#a.excludes + 1] = e
+        end
+      end
+      stack[#stack + 1] = a
+    elseif token == "!" then
+      if #stack == 0 then return nil end
+      local value = table.remove(stack)
+      for _, c in ipairs(value.components) do
+        excludes[#excludes + 1] = c
+      end
+      for _, e in ipairs(value.excludes) do
+        excludes[#excludes + 1] = e
+      end
+    else
+      push_operand(token)
+    end
+  end
+
+  local result_components = {}
+  local result_has_sub = false
+  local result_plus_after_sub = false
+  for _, value in ipairs(stack) do
+    for _, c in ipairs(value.components) do
+      result_components[#result_components + 1] = c
+    end
+    for _, e in ipairs(value.excludes) do
+      excludes[#excludes + 1] = e
+    end
+    result_has_sub = result_has_sub or value.has_sub
+    result_plus_after_sub = result_plus_after_sub or value.plus_after_sub
+  end
+  local pure_sub = #stack == 1 and result_has_sub
+                   and not result_plus_after_sub
+  return result_components, excludes, pure_sub, result_has_sub
 end
 
 local function pure_subtraction_results(store, components)
@@ -3072,27 +3156,41 @@ local function search_by_leaves(store, leaves, mode, max_results,
 end
 
 local function search_hybrid(store, components, mode, max_results,
-                             disabled_blocks)
+                             disabled_blocks, notation)
   if #components == 0 then return {} end
+  local rpn = notation == "rpn"
   local cache_key = table.concat(components, "\1") .. ":" .. mode .. ":"
                     .. max_results .. disabled_cache_key(disabled_blocks)
+                    .. (rpn and ":rpn" or ":infix")
   local hit = cache_get(hybrid_cache, cache_key)
   if hit then return hit end
-  local steps = parse_algebra_steps(components)
   local current, excludes = {}, {}
   local pure_sub = true
   local has_sub = false
-  for _, step in ipairs(steps) do
-    local item = normalize_algebra_item(store, step.item, mode)
-    if item ~= "" then
-      if step.op == "+" then
-        if #current > 0 and has_sub then pure_sub = false end
-        current[#current + 1] = item
-      elseif step.op == "!" then
-        excludes[#excludes + 1] = item
-      else
-        has_sub = true
-        current = apply_single_subtraction(store, current, item)
+  if rpn then
+    local comps, ex, rpn_pure_sub, rpn_has_sub =
+        M._rpn.evaluate(store, components, mode)
+    if not comps then
+      local empty = {}
+      cache_put(hybrid_cache, cache_key, empty, 256)
+      return empty
+    end
+    current, excludes = comps, ex
+    pure_sub, has_sub = rpn_pure_sub, rpn_has_sub
+  else
+    local steps = parse_algebra_steps(components)
+    for _, step in ipairs(steps) do
+      local item = normalize_algebra_item(store, step.item, mode)
+      if item ~= "" then
+        if step.op == "+" then
+          if #current > 0 and has_sub then pure_sub = false end
+          current[#current + 1] = item
+        elseif step.op == "!" then
+          excludes[#excludes + 1] = item
+        else
+          has_sub = true
+          current = apply_single_subtraction(store, current, item)
+        end
       end
     end
   end
@@ -3257,6 +3355,7 @@ local function default_config()
     data_path = "ids_data.bin",
     custom_path = "",
     shuangpin_scheme = "flypy",
+    algebra_notation = "infix",
     ids_format = "unicode",
     variant_trigger = "/",
     variant_replace_key = "Shift+V",
@@ -3304,6 +3403,7 @@ local function load_config(env)
   cfg.data_path = get_s("data_file", cfg.data_path)
   cfg.custom_path = get_s("custom_file", cfg.custom_path)
   cfg.shuangpin_scheme = get_s("shuangpin_scheme", cfg.shuangpin_scheme)
+  cfg.algebra_notation = get_s("algebra_notation", cfg.algebra_notation)
   cfg.ids_format = get_s("ids_format", cfg.ids_format)
   cfg.variant_trigger = get_s("variant_trigger", cfg.variant_trigger)
   cfg.variant_replace_key = get_s("variant_replace_key", cfg.variant_replace_key)
@@ -3323,6 +3423,7 @@ local function load_config(env)
   if cfg.shuangpin_scheme ~= "zrm" and cfg.shuangpin_scheme ~= "quanpin" then
     cfg.shuangpin_scheme = "flypy"
   end
+  if cfg.algebra_notation ~= "rpn" then cfg.algebra_notation = "infix" end
   if cfg.variant_trigger == "" then cfg.variant_trigger = "/" end
   if cfg.variant_replace_key == "" then cfg.variant_replace_key = "Shift+V" end
   if cfg.max_results <= 0 then cfg.max_results = 60 end
@@ -3477,8 +3578,28 @@ local function try_commit_closed_group(ctx, env)
   if not store then return false end
   local components, excludes = evaluate_algebra_expression(
       store, group.inner, pinyin_mode(env.config, ctx))
-  local component = format_group_component(group.op, components, excludes)
   local base = ctx.input:sub(1, #ctx.input - #st.pending)
+  if env.config.algebra_notation == "rpn" then
+    -- 后缀模式：括号结果先作为操作数入栈，外层 +/-/! 改写为后缀运算符。
+    local component = format_group_component("", components, excludes)
+    if component == "" then
+      ctx.input = base
+      return true
+    end
+    local code = group.op ~= "" and ("(" .. group.inner .. ")") or st.pending
+    st.components[#st.components + 1] = component
+    st.codes[#st.codes + 1] = code
+    local new_input = base .. code .. "'"
+    if group.op ~= "" then
+      st.components[#st.components + 1] = group.op
+      st.codes[#st.codes + 1] = group.op
+      new_input = new_input .. group.op .. "'"
+    end
+    save_hybrid_state(ctx, st.components, st.codes)
+    ctx.input = new_input
+    return true
+  end
+  local component = format_group_component(group.op, components, excludes)
   if component == "" then
     ctx.input = base
     return true
@@ -3488,6 +3609,37 @@ local function try_commit_closed_group(ctx, env)
   save_hybrid_state(ctx, st.components, st.codes)
   ctx.input = base .. st.pending .. "'"
   return true
+end
+
+-- 逆波兰后缀模式下，按当前已保存的部件层计算表达式栈深度并判断运算符是否可用。
+function M._rpn.can_apply(components, op)
+  local depth = 0
+  for _, component in ipairs(components) do
+    if component == "+" or component == "-" then
+      if depth < 2 then return false end
+      depth = depth - 1
+    elseif component == "!" then
+      if depth < 1 then return false end
+      depth = depth - 1
+    else
+      depth = depth + 1
+    end
+  end
+  if op == "!" then return depth >= 1 end
+  return depth >= 2
+end
+
+-- 把后缀运算符作为一个独立状态层追加到输入末尾。
+function M._rpn.append(ctx, env, st, op)
+  if not ctx.composition:empty()
+     and ctx.composition:back():has_tag(env.config.hybrid.tag) then
+    ctx:clear_non_confirmed_composition()
+  end
+  st.components[#st.components + 1] = op
+  st.codes[#st.codes + 1] = op
+  save_hybrid_state(ctx, st.components, st.codes)
+  if ctx.caret_pos ~= #ctx.input then ctx.caret_pos = #ctx.input end
+  ctx.input = ctx.input .. op .. "'"
 end
 
 -- ---------------------------------------------------------------------------
@@ -3810,6 +3962,23 @@ local function processor_func(key_event, env)
       end
       ctx:pop_input(pending_bytes)
     elseif #st.components > 0 then
+      -- 已闭合括号在状态中是一个整体层；退格时先重新打开括号，
+      -- 让后续退格能逐个字符删除，而不是一次删除整个括号表达式。
+      local reopened
+      if #st.codes > 0 then
+        reopened = M._rpn.reopen_closed_group(st.codes[#st.codes])
+      end
+      if reopened then
+        local suffix = st.codes[#st.codes] .. "'"
+        if ends_with(ctx.input, suffix) then
+          local base = ctx.input:sub(1, #ctx.input - #suffix)
+          st.components[#st.components] = nil
+          st.codes[#st.codes] = nil
+          save_hybrid_state(ctx, st.components, st.codes)
+          ctx.input = base .. reopened
+          return 1
+        end
+      end
       local code_len = #st.codes[#st.codes]
       st.components[#st.components] = nil
       st.codes[#st.codes] = nil
@@ -3930,6 +4099,18 @@ local function processor_func(key_event, env)
         save_hybrid_state(ctx, { variant_result }, { display })
         ctx:clear()
         ctx.input = env.config.hybrid.prefix .. display .. "'"
+      end
+    end
+
+    if env.config.algebra_notation == "rpn"
+       and (is_minus or is_plus or is_exclude) then
+      local st = read_hybrid_state(ctx, env.config.hybrid.prefix)
+      if st.pending == "" then
+        local op = is_minus and "-" or (is_plus and "+" or "!")
+        if #st.components > 0 and M._rpn.can_apply(st.components, op) then
+          M._rpn.append(ctx, env, st, op)
+        end
+        return 1
       end
     end
 
@@ -4399,7 +4580,8 @@ local function query_hybrid(segment, env)
                                   pinyin_mode(env.config, ctx),
                                   env.config.max_results,
                                   env.config.disabled_blocks_enabled
-                                    and env.config.disabled_blocks or nil)
+                                    and env.config.disabled_blocks or nil,
+                                  env.config.algebra_notation)
     build_result_candidates(store, results, segment, pending, env.config, ctx)
   elseif pending ~= "" and not is_operator_only and has_component then
     local parsed = parse_pending_components(store, pending,
@@ -4533,9 +4715,11 @@ M._internal = {
   parse_pending_components = parse_pending_components,
   parse_algebra_steps = parse_algebra_steps,
   parse_single_group = parse_single_group,
+  reopen_closed_group = M._rpn.reopen_closed_group,
   find_last_ascii_run = find_last_ascii_run,
   replace_last_ascii_run = replace_last_ascii_run,
   evaluate_algebra_expression = evaluate_algebra_expression,
+  evaluate_rpn_expression = M._rpn.evaluate,
   format_group_component = format_group_component,
   is_component_expression = is_component_expression,
   build_multi_component_candidates = build_multi_component_candidates,

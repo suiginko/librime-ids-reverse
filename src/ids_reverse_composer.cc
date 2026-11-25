@@ -67,6 +67,53 @@ std::string CurrentPinyinMode(Context* ctx, const ReverseConfig& config) {
   return mode;
 }
 
+// 逆波兰后缀模式下，按当前已保存的部件层计算表达式栈深度。
+// 返回 -1 表示表达式本身已非法。
+int RpnStackDepth(const std::vector<std::string>& components) {
+  int depth = 0;
+  for (const auto& component : components) {
+    if (component == "+" || component == "-") {
+      if (depth < 2)
+        return -1;
+      --depth;
+    } else if (component == "!") {
+      if (depth < 1)
+        return -1;
+      --depth;
+    } else {
+      ++depth;
+    }
+  }
+  return depth;
+}
+
+bool CanApplyRpnOperator(const std::vector<std::string>& components, char op) {
+  int depth = RpnStackDepth(components);
+  if (depth < 0)
+    return false;
+  return op == '!' ? depth >= 1 : depth >= 2;
+}
+
+// 把后缀运算符作为一个独立状态层追加到输入末尾。
+void AppendRpnOperator(Context* ctx,
+                       const ReverseConfig& config,
+                       HybridState* st,
+                       char op) {
+  std::string token(1, op);
+  if (!ctx->composition().empty() &&
+      ctx->composition().back().HasTag(config.hybrid.tag)) {
+    ctx->ClearNonConfirmedComposition();
+  }
+  st->components.push_back(token);
+  st->codes.push_back(token);
+  SaveHybridState(ctx, st->components, st->codes);
+  if (ctx->caret_pos() != ctx->input().size())
+    ctx->set_caret_pos(ctx->input().size());
+  ctx->set_input(ctx->input() + token + "'");
+  if (ctx->caret_pos() != ctx->input().size())
+    ctx->set_caret_pos(ctx->input().size());
+}
+
 // 括号闭合且内部拼音都已消歧后，求值并作为一个部件加入状态。
 bool TryCommitClosedGroup(Context* ctx, const ReverseConfig& config) {
   if (!ctx || !IsReverseActive(ctx, config.hybrid.prefix))
@@ -85,10 +132,36 @@ bool TryCommitClosedGroup(Context* ctx, const ReverseConfig& config) {
   if (!EvaluateAlgebraExpression(store, group.inner,
                                  CurrentPinyinMode(ctx, config), &eval))
     return false;
-  std::string component =
-      FormatGroupComponent(group.op, eval.components, eval.excludes);
   const std::string& input = ctx->input();
   std::string base = input.substr(0, input.size() - st.pending.size());
+
+  if (IsRpnNotation(config)) {
+    // 后缀模式：括号结果先作为操作数入栈，外层 +/-/! 改写为后缀运算符。
+    std::string component =
+        FormatGroupComponent(0, eval.components, eval.excludes);
+    if (component.empty()) {
+      ctx->set_input(base);
+      return true;
+    }
+    std::string code = group.op ? "(" + group.inner + ")" : st.pending;
+    st.components.push_back(component);
+    st.codes.push_back(code);
+    std::string new_input = base + code + "'";
+    if (group.op) {
+      std::string token(1, group.op);
+      st.components.push_back(token);
+      st.codes.push_back(token);
+      new_input += token + "'";
+    }
+    SaveHybridState(ctx, st.components, st.codes);
+    ctx->set_input(new_input);
+    if (ctx->caret_pos() != ctx->input().size())
+      ctx->set_caret_pos(ctx->input().size());
+    return true;
+  }
+
+  std::string component =
+      FormatGroupComponent(group.op, eval.components, eval.excludes);
   if (component.empty()) {
     ctx->set_input(base);
     return true;
@@ -501,6 +574,23 @@ rime::ProcessResult IdsReverseProcessor::ProcessKeyEvent(
       }
       ctx->PopInput(pending_bytes);
     } else if (!st.components.empty()) {
+      // 已闭合括号在状态中是一个整体层；退格时先重新打开括号，
+      // 让后续退格能逐个字符删除，而不是一次删除整个括号表达式。
+      std::string reopened;
+      if (!st.codes.empty() && ReopenClosedGroup(st.codes.back(), &reopened)) {
+        const std::string& input = ctx->input();
+        const std::string suffix = st.codes.back() + "'";
+        if (EndsWith(input, suffix)) {
+          std::string base = input.substr(0, input.size() - suffix.size());
+          st.components.pop_back();
+          st.codes.pop_back();
+          SaveHybridState(ctx, st.components, st.codes);
+          ctx->set_input(base + reopened);
+          if (ctx->caret_pos() != ctx->input().size())
+            ctx->set_caret_pos(ctx->input().size());
+          return rime::kAccepted;
+        }
+      }
       const size_t code_len = st.codes.back().size();
       st.components.pop_back();
       st.codes.pop_back();
@@ -645,6 +735,16 @@ rime::ProcessResult IdsReverseProcessor::ProcessKeyEvent(
         SaveHybridState(ctx, {variant_result}, {display});
         ctx->Clear();
         ctx->set_input(config_.hybrid.prefix + display + "'");
+      }
+    }
+    if (IsRpnNotation(config_) && (is_minus || is_plus || is_exclude)) {
+      HybridState st = ReadHybridState(ctx, config_.hybrid.prefix);
+      if (st.pending.empty()) {
+        char op = is_minus ? '-' : (is_plus ? '+' : '!');
+        if (!st.components.empty() && CanApplyRpnOperator(st.components, op)) {
+          AppendRpnOperator(ctx, config_, &st, op);
+        }
+        return rime::kAccepted;
       }
     }
     char ch = repr[0];

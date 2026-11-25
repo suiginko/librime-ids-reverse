@@ -134,6 +134,8 @@ by the ticket namespace). Shared settings live at the top level; only
   `search_tips`.
 - O mode = **hybrid**: `hybrid_prefix` (default `O`), `hybrid_tag`,
   `hybrid_tips`.
+- O mode algebra notation: `algebra_notation` = `infix` (default) or `rpn`
+  (postfix: operands first, then `+`/`-`/`!`).
 
 If both prefixes are equal, search mode wins. Config defaults and normalization
 live in `ReverseConfig` and `LoadReverseConfig`; mirror them in the Lua
@@ -176,7 +178,10 @@ as a multi-character combo are stored as one layer; Backspace removes
   code into a component; Backspace removes pending text or the last component;
   `1`–`6` and `;` select; space confirms; `/` starts a variant query;
   `Shift+V` replaces the preedit character with the selected variant;
-  letters and `-`/`+`/`!` are pushed as input. `select_notifier` temporarily
+  letters and `-`/`+`/`!` are pushed as input. In `algebra_notation: rpn` mode,
+  `-`/`+`/`!` are committed as postfix operator layers instead. Backspace
+  reopens a just-closed group (e.g. `O渺-(沙-少)` → `O渺-(沙-少`) so the
+  group can be deleted character by character. `select_notifier` temporarily
   disables `_auto_commit` and commits result candidates itself.
 - **Parentheses** are edited incrementally: while `pending` is a single
   `[op]? ( ... )?` expression, selecting a component replaces only the last
@@ -194,7 +199,10 @@ as a multi-character combo are stored as one layer; Backspace removes
   and scans at most 2000 candidates to avoid walking huge dictionaries.
 - **Search**: `SearchHybrid` applies `-`, `+`/`=`, and `!` algebra with `()`
   grouping, expands pure subtraction to characters containing the remainder,
-  matches leaves, then ranks. Exact top-level leaf multiset hits from
+  matches leaves, then ranks. With `algebra_notation: rpn`, state operator
+  layers are evaluated by `EvaluateRpnComponents` instead: operands are pushed
+  first, `+`/`-` combine the top two values, and postfix `!` moves the top value
+  to the exclusion list. Exact top-level leaf multiset hits from
   `LEAF_STRUCT` are merged first and scored with the same exact-structure floor
   as I mode. Group parentheses are resolved before state entry, so `SearchHybrid`
   normally receives only paren-free component strings.
@@ -292,6 +300,7 @@ one changed. Applies to:
 | Add component alias | C++ `CanonMap`, generator `EQUIV_GROUPS`, Lua `CANON_MAP` |
 | Add block name/alias | `ids_store.cc`, both `kBlockNames`, Lua tables, dump script |
 | Change search/ranking | `src/ids_reverse_translator.cc` (`SearchComponents`, `ScoreCandidate`) and/or `src/ids_reverse_search.cc` (`SearchHybrid`), plus Lua equivalents |
+| Change O-mode algebra notation | `src/ids_reverse_config.{h,cc}`, `src/ids_reverse_search.{h,cc}` (`EvaluateRpnComponents`), composer processor, Lua `load_config`/`_rpn`/`search_hybrid` |
 | Change O-mode group editing | `src/ids_reverse_group.{h,cc}`, composer `OnSelectAfter`/`ProcessKeyEvent`, translator `QueryHybrid`, `EvaluateAlgebraExpression`, plus Lua equivalents |
 
 ## Before committing
