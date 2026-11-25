@@ -758,7 +758,13 @@ bool IdsReverseSegmentor::Proceed(Segmentation* segmentation) {
       seg.tags.insert("confirmed_component");
     } else {
       seg = Segment(static_cast<int>(start), static_cast<int>(input.size()));
-      seg.tags.insert("abc");
+      const std::string seg_text = input.substr(start);
+      const bool is_variant_lookup =
+          !config_.variant_trigger.empty() &&
+          EndsWith(seg_text, config_.variant_trigger) &&
+          !ctx->get_property(kVariantsProperty).empty();
+      if (!is_variant_lookup)
+        seg.tags.insert("abc");
       seg.tags.insert("hanzi_component");
     }
   }

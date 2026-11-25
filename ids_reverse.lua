@@ -4024,7 +4024,15 @@ local function segmentor_func(segmentation, env)
       seg.tags = Set({ "confirmed_component" })
     else
       seg = Segment(start, #input)
-      seg.tags = Set({ "abc", "hanzi_component" })
+      local seg_text = input:sub(start + 1)
+      local vtrig = env.config.variant_trigger
+      local is_variant_lookup = vtrig ~= "" and ends_with(seg_text, vtrig)
+                                and ctx:get_property(VARIANTS_PROPERTY) ~= ""
+      if is_variant_lookup then
+        seg.tags = Set({ "hanzi_component" })
+      else
+        seg.tags = Set({ "abc", "hanzi_component" })
+      end
     end
   end
   seg.prompt = env.config.hybrid.tips
