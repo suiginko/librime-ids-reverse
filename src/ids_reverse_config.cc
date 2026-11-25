@@ -71,6 +71,26 @@ void LoadDisabledBlocks(Config* config,
   cfg->disabled_blocks_enabled = !cfg->disabled_blocks.empty();
 }
 
+// 读取 Rime 拼写代数规则列表；非字符串项直接跳过。
+void LoadAlgebra(Config* config,
+                 const std::string& ns,
+                 std::vector<std::string>* algebra) {
+  algebra->clear();
+  if (!config)
+    return;
+  auto list = config->GetList(ns + "/algebra");
+  if (!list)
+    return;
+  for (size_t i = 0; i < list->size(); ++i) {
+    auto value = rime::As<rime::ConfigValue>(list->GetValueAt(i));
+    if (!value)
+      continue;
+    std::string rule;
+    if (value->GetString(&rule) && !rule.empty())
+      algebra->push_back(rule);
+  }
+}
+
 }  // namespace
 
 bool StartsWith(const std::string& s, const std::string& prefix) {
@@ -114,7 +134,7 @@ void LoadReverseConfig(const rime::Ticket& ticket,
 
   conf->GetString(ns + "/data_file", &config->data_path);
   conf->GetString(ns + "/custom_file", &config->custom_path);
-  conf->GetString(ns + "/shuangpin_scheme", &config->shuangpin_scheme);
+  LoadAlgebra(conf, ns, &config->algebra);
   conf->GetString(ns + "/algebra_notation", &config->algebra_notation);
   conf->GetString(ns + "/ids_format", &config->ids_format);
   conf->GetString(ns + "/variant_trigger", &config->variant_trigger);
@@ -145,9 +165,6 @@ void LoadReverseConfig(const rime::Ticket& ticket,
     config->variant_trigger = "/";
   if (config->variant_replace_key.empty())
     config->variant_replace_key = "Shift+V";
-  if (config->shuangpin_scheme != "zrm" &&
-      config->shuangpin_scheme != "quanpin")
-    config->shuangpin_scheme = "flypy";
   if (config->algebra_notation != "rpn")
     config->algebra_notation = "infix";
   if (config->max_results <= 0)

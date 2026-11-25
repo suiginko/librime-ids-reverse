@@ -12,6 +12,7 @@
 #include <utility>
 
 #include "ids_store.h"
+#include "ids_reverse_input.h"
 #include "ids_text.h"
 
 namespace ids_reverse {
@@ -52,129 +53,14 @@ bool StartsWith(const std::string& s, const std::string& prefix) {
   return s.size() >= prefix.size() && s.compare(0, prefix.size(), prefix) == 0;
 }
 
-// ---------------------------------------------------------------------------
-// 双拼解码（只保留插件已支持的 flypy / zrm / quanpin）
-// ---------------------------------------------------------------------------
-
-std::string DecodeShuangpin(IdsStore& store,
-                            const std::string& raw,
-                            const std::string& mode) {
-  std::string sp = AsciiLower(raw);
-  if (sp.size() != 2 || !IsAsciiAlphaOnly(sp) || mode == "quanpin")
-    return sp;
-
-  static const hash_map<std::string, std::string> kZeroVowels = {
-      {"aa", "a"},   {"ai", "ai"}, {"an", "an"}, {"ah", "ang"},
-      {"ao", "ao"},  {"ee", "e"},  {"ei", "ei"}, {"en", "en"},
-      {"eg", "eng"}, {"er", "er"}, {"oo", "o"},  {"ou", "ou"}};
-  auto z = kZeroVowels.find(sp);
-  if (z != kZeroVowels.end() && (store.valid_pinyins().count(z->second) ||
-                                 store.py_map().count(z->second))) {
-    return z->second;
-  }
-
-  auto init_of = [](char c) -> std::string {
-    if (c == 'v')
-      return "zh";
-    if (c == 'i')
-      return "ch";
-    if (c == 'u')
-      return "sh";
-    return std::string(1, c);
-  };
-
-  static const hash_map<char, std::vector<std::string>> kFlypyFinals = {
-      {'q', {"iu"}},
-      {'w', {"ei"}},
-      {'r', {"uan"}},
-      {'t', {"ue", "ve"}},
-      {'y', {"un"}},
-      {'p', {"ie"}},
-      {'d', {"ai"}},
-      {'f', {"en"}},
-      {'g', {"eng"}},
-      {'h', {"ang"}},
-      {'j', {"an"}},
-      {'k', {"uai", "ing"}},
-      {'l', {"uang", "iang"}},
-      {'z', {"ou"}},
-      {'x', {"ua", "ia"}},
-      {'c', {"ao"}},
-      {'v', {"ui", "v"}},
-      {'b', {"in"}},
-      {'n', {"iao"}},
-      {'m', {"ian"}},
-      {'s', {"iong", "ong"}},
-      {'o', {"uo", "o"}},
-      {'u', {"u"}},
-      {'i', {"i"}},
-      {'a', {"a"}},
-      {'e', {"e"}}};
-
-  static const hash_map<char, std::vector<std::string>> kZrmFinals = {
-      {'q', {"iu"}},
-      {'w', {"ua", "ia"}},
-      {'r', {"uan"}},
-      {'t', {"ue", "ve"}},
-      {'y', {"uai", "ing"}},
-      {'p', {"un"}},
-      {'d', {"uang", "iang"}},
-      {'f', {"en"}},
-      {'g', {"eng"}},
-      {'h', {"ang"}},
-      {'j', {"an"}},
-      {'k', {"ao"}},
-      {'l', {"ai"}},
-      {'z', {"ou"}},
-      {'x', {"ia"}},
-      {'c', {"ch"}},
-      {'v', {"ui", "v"}},
-      {'b', {"in"}},
-      {'n', {"in"}},
-      {'m', {"ian"}},
-      {'s', {"iong", "ong"}},
-      {'o', {"uo", "o"}},
-      {'u', {"u"}},
-      {'i', {"i"}},
-      {'a', {"a"}},
-      {'e', {"e"}}};
-
-  const auto& finals = (mode == "zrm") ? kZrmFinals : kFlypyFinals;
-  auto fit = finals.find(sp[1]);
-  if (fit == finals.end())
-    return sp;
-  std::string init = init_of(sp[0]);
-  for (const auto& fin : fit->second) {
-    std::string py = init + fin;
-    if ((init == "j" || init == "q" || init == "x" || init == "y") &&
-        fin == "ve")
-      py = init + "ue";
-    else if ((init == "j" || init == "q" || init == "x" || init == "y") &&
-             fin == "v")
-      py = init + "u";
-    if (store.valid_pinyins().count(py) || store.py_map().count(py))
-      return py;
-  }
-  return sp;
-}
-
-std::string NormalizeComponent(IdsStore& store,
-                               const std::string& raw,
-                               const std::string& mode) {
+std::string NormalizeComponent(const std::string& raw,
+                               const InputCodec& codec) {
   std::string s = StripSpace(raw);
   if (s.empty())
     return s;
-  std::string lower = AsciiLower(s);
-  bool known = store.FindKey(s) != nullptr || store.FindKey(lower) != nullptr ||
-               store.py_map().count(s) || store.py_map().count(lower) ||
-               store.ResolveTerm(s) != kNoToken;
-  if (!known && lower.size() == 2 && IsAsciiAlphaOnly(lower)) {
-    std::string decoded = DecodeShuangpin(store, lower, mode);
-    if (decoded != lower && (store.valid_pinyins().count(decoded) ||
-                             store.py_map().count(decoded))) {
-      return Canon(decoded);
-    }
-  }
+  auto decoded = codec.DecodeExact(AsciiLower(s));
+  if (!decoded.empty())
+    return Canon(decoded.front());
   return Canon(s);
 }
 
@@ -797,11 +683,11 @@ struct AlgebraStep {
 // 单字部件保留原字形，供递归扣除读取其 IDS 结构；拼音编码仍走常规规范化。
 std::string NormalizeAlgebraItem(IdsStore& store,
                                  const std::string& raw,
-                                 const std::string& mode) {
+                                 const InputCodec& codec) {
   std::string s = StripSpace(raw);
   if (Utf8Chars(s).size() == 1)
     return s;
-  return NormalizeComponent(store, s, mode);
+  return NormalizeComponent(s, codec);
 }
 
 // 流式解析操作符：支持任意次 + / - / ! 交替；汉字串按字符拆分为独立运算项。
@@ -1058,13 +944,13 @@ void RemoveExcluded(IdsStore& store,
 // 普通多项检索与纯减法后的扩展检索共用，保证两者排序/过滤一致。
 std::vector<uint32_t> SearchByLeaves(IdsStore& store,
                                      const std::vector<std::string>& leaves,
-                                     const std::string& mode,
+                                     const InputCodec& codec,
                                      size_t max_results,
                                      const rime::hash_set<int>* disabled_blocks,
                                      const ExcludeEntries& exclude_entries) {
   std::vector<std::string> normalized;
   for (const auto& raw : leaves) {
-    std::string n = NormalizeComponent(store, raw, mode);
+    std::string n = NormalizeComponent(raw, codec);
     if (!n.empty())
       normalized.push_back(n);
   }
@@ -1186,8 +1072,8 @@ void ApplyEvalItem(IdsStore& store,
                    AlgebraEvalState* st,
                    char op,
                    const std::string& raw,
-                   const std::string& mode) {
-  std::string item = NormalizeAlgebraItem(store, raw, mode);
+                   const InputCodec& codec) {
+  std::string item = NormalizeAlgebraItem(store, raw, codec);
   if (item.empty())
     return;
   if (op == '+') {
@@ -1227,7 +1113,7 @@ bool IsEvalSeparator(char c) {
 size_t EvalAlgebraSeq(IdsStore& store,
                       const std::string& s,
                       size_t i,
-                      const std::string& mode,
+                      const InputCodec& codec,
                       bool stop_at_rparen,
                       AlgebraEvalState* st) {
   char op = '+';
@@ -1240,7 +1126,7 @@ size_t EvalAlgebraSeq(IdsStore& store,
     }
     if (c == '(') {
       AlgebraEvalState inner;
-      size_t next = EvalAlgebraSeq(store, s, i + 1, mode, true, &inner);
+      size_t next = EvalAlgebraSeq(store, s, i + 1, codec, true, &inner);
       MergeEvalGroup(store, st, op, inner);
       if (op == '!')
         op = '+';
@@ -1264,12 +1150,12 @@ size_t EvalAlgebraSeq(IdsStore& store,
     if (item.empty())
       continue;
     if (IsAsciiAlphaOnly(item)) {
-      ApplyEvalItem(store, st, op, item, mode);
+      ApplyEvalItem(store, st, op, item, codec);
       if (op == '!')
         op = '+';
     } else {
       for (const auto& ch : Utf8Chars(item)) {
-        ApplyEvalItem(store, st, op, ch, mode);
+        ApplyEvalItem(store, st, op, ch, codec);
         if (op == '!')
           op = '+';
       }
@@ -1282,12 +1168,12 @@ size_t EvalAlgebraSeq(IdsStore& store,
 
 bool EvaluateAlgebraExpression(IdsStore& store,
                                const std::string& expression,
-                               const std::string& mode,
+                               const InputCodec& codec,
                                AlgebraEvaluation* out) {
   if (!out)
     return false;
   AlgebraEvalState st;
-  EvalAlgebraSeq(store, expression, 0, mode, false, &st);
+  EvalAlgebraSeq(store, expression, 0, codec, false, &st);
   out->components = std::move(st.components);
   out->excludes = std::move(st.excludes);
   return true;
@@ -1306,7 +1192,7 @@ struct RpnValue {
 // 多字组合部件等都能直接入栈。运算符栈不足时返回 false。
 bool EvaluateRpnComponents(IdsStore& store,
                            const std::vector<std::string>& tokens,
-                           const std::string& mode,
+                           const InputCodec& codec,
                            AlgebraEvaluation* out,
                            bool* pure_sub,
                            bool* has_sub) {
@@ -1318,7 +1204,7 @@ bool EvaluateRpnComponents(IdsStore& store,
 
   auto push_operand = [&](const std::string& text) {
     AlgebraEvaluation value;
-    EvaluateAlgebraExpression(store, text, mode, &value);
+    EvaluateAlgebraExpression(store, text, codec, &value);
     RpnValue item;
     item.components = std::move(value.components);
     item.excludes = std::move(value.excludes);
@@ -1386,7 +1272,7 @@ bool EvaluateRpnComponents(IdsStore& store,
 
 std::vector<uint32_t> SearchHybrid(IdsStore& store,
                                    const std::vector<std::string>& components,
-                                   const std::string& mode,
+                                   const InputCodec& codec,
                                    size_t max_results,
                                    const rime::hash_set<int>* disabled_blocks,
                                    bool rpn) {
@@ -1402,7 +1288,7 @@ std::vector<uint32_t> SearchHybrid(IdsStore& store,
     AlgebraEvaluation eval;
     bool rpn_pure_sub = false;
     bool rpn_has_sub = false;
-    if (!EvaluateRpnComponents(store, components, mode, &eval, &rpn_pure_sub,
+    if (!EvaluateRpnComponents(store, components, codec, &eval, &rpn_pure_sub,
                                &rpn_has_sub))
       return {};
     current = std::move(eval.components);
@@ -1412,7 +1298,7 @@ std::vector<uint32_t> SearchHybrid(IdsStore& store,
   } else {
     std::vector<AlgebraStep> steps = ParseAlgebraSteps(components);
     for (const auto& step : steps) {
-      std::string item = NormalizeAlgebraItem(store, step.item, mode);
+      std::string item = NormalizeAlgebraItem(store, step.item, codec);
       if (item.empty())
         continue;
       if (step.op == '+') {
@@ -1436,7 +1322,7 @@ std::vector<uint32_t> SearchHybrid(IdsStore& store,
     std::vector<uint32_t> results = PureSubtractionResults(store, current);
     RemoveExcluded(store, exclude_entries, &results);
     std::vector<uint32_t> expanded = SearchByLeaves(
-        store, current, mode, max_results, disabled_blocks, exclude_entries);
+        store, current, codec, max_results, disabled_blocks, exclude_entries);
 
     hash_set<uint32_t> seen;
     seen.reserve(results.size() + expanded.size());
@@ -1460,15 +1346,59 @@ std::vector<uint32_t> SearchHybrid(IdsStore& store,
   if (current.empty())
     return {};
 
-  return SearchByLeaves(store, current, mode, max_results, disabled_blocks,
+  return SearchByLeaves(store, current, codec, max_results, disabled_blocks,
                         exclude_entries);
+}
+
+std::vector<uint32_t> GetPinyinCandidates(IdsStore& store,
+                                          const std::string& pinyin,
+                                          size_t limit) {
+  const auto& py_char_map = store.py_char_map();
+  if (!py_char_map.empty()) {
+    auto it = py_char_map.find(pinyin);
+    if (it == py_char_map.end())
+      return {};
+    if (limit > 0 && it->second.size() > limit) {
+      std::vector<uint32_t> ids(it->second.begin(), it->second.begin() + limit);
+      return ids;
+    }
+    return it->second;
+  }
+
+  // 兼容旧数据（理论上 v3 不允许缺少 PY_CHAR）。
+  auto it = store.py_map().find(pinyin);
+  if (it == store.py_map().end())
+    return {};
+  std::vector<uint32_t> ids;
+  hash_set<uint32_t> seen;
+  for (uint16_t t : it->second) {
+    uint32_t cp = store.TokenCp(t);
+    uint32_t id = cp ? store.IdOfCp(cp) : kInvalidId;
+    if (id != kInvalidId && seen.insert(id).second)
+      ids.push_back(id);
+  }
+  std::sort(ids.begin(), ids.end(), [&](uint32_t a, uint32_t b) {
+    uint32_t fa = store.Hot(a).freq;
+    uint32_t fb = store.Hot(b).freq;
+    if (fa != fb)
+      return fa > fb;
+    return a < b;
+  });
+  if (limit > 0 && ids.size() > limit)
+    ids.resize(limit);
+  return ids;
 }
 
 std::vector<uint32_t> GetComponentCandidates(IdsStore& store,
                                              const std::string& raw_code,
-                                             const std::string& mode,
+                                             const InputCodec& codec,
                                              size_t limit) {
   std::string code = StripSpace(raw_code);
+  code.erase(
+      std::remove_if(
+          code.begin(), code.end(),
+          [](char c) { return c == '\'' || c == '/' || c == '.' || c == '_'; }),
+      code.end());
   while (!code.empty() &&
          (code.front() == '-' || code.front() == '+' || code.front() == '!'))
     code.erase(code.begin());
@@ -1478,76 +1408,58 @@ std::vector<uint32_t> GetComponentCandidates(IdsStore& store,
   if (!IsAsciiAlphaOnly(code))
     return {};
 
+  // 完整编码优先；否则按编码前缀展开（增量输入）。
+  std::vector<std::string> lookups = codec.DecodeExact(code);
+  bool exact = !lookups.empty();
+  if (!exact)
+    lookups = codec.DecodePrefix(code);
+  if (lookups.empty())
+    return {};
+  bool unbounded = exact && lookups.size() == 1;
+
   const auto& py_char_map = store.py_char_map();
-  std::string lookup = code;
-  if (!py_char_map.count(lookup) && lookup.size() == 2) {
-    std::string decoded = DecodeShuangpin(store, lookup, mode);
-    if (decoded != lookup)
-      lookup = decoded;
-  }
-
-  // v3 数据：完整字符拼音索引优先。精确单音节不设上限。
-  if (!py_char_map.empty()) {
-    auto exact = py_char_map.find(lookup);
-    if (exact != py_char_map.end())
-      return exact->second;
-    // 前缀匹配保留上限，避免一次列出上万字。
-    std::vector<uint32_t> ids;
-    hash_set<uint32_t> seen;
-    for (const auto& kv : py_char_map) {
-      if (!StartsWith(kv.first, lookup))
-        continue;
-      for (uint32_t id : kv.second) {
-        if (seen.insert(id).second)
-          ids.push_back(id);
-      }
-    }
-    std::sort(ids.begin(), ids.end(), [&](uint32_t a, uint32_t b) {
-      uint32_t fa = store.Hot(a).freq;
-      uint32_t fb = store.Hot(b).freq;
-      if (fa != fb)
-        return fa > fb;
-      return a < b;
-    });
-    if (limit > 0 && ids.size() > limit)
-      ids.resize(limit);
-    return ids;
-  }
-
-  // 兼容旧数据（理论上 v3 不允许缺少 PY_CHAR）。
-  std::vector<uint16_t> tokens;
-  auto pit = store.py_map().find(lookup);
-  if (pit != store.py_map().end()) {
-    tokens = pit->second;
-  } else {
-    hash_set<uint16_t> seen;
-    for (const auto& kv : store.py_map()) {
-      if (!StartsWith(kv.first, lookup))
-        continue;
-      for (uint16_t t : kv.second) {
-        if (seen.insert(t).second)
-          tokens.push_back(t);
-      }
-    }
-  }
-
   std::vector<uint32_t> ids;
-  hash_set<uint32_t> seen_ids;
-  for (uint16_t t : tokens) {
-    uint32_t cp = store.TokenCp(t);
-    if (!cp)
-      continue;
-    uint32_t id = store.IdOfCp(cp);
-    if (id == kInvalidId || !seen_ids.insert(id).second)
-      continue;
-    ids.push_back(id);
+  hash_set<uint32_t> seen;
+
+  auto add_id = [&](uint32_t id) {
+    if (id != kInvalidId && seen.insert(id).second)
+      ids.push_back(id);
+  };
+
+  if (!py_char_map.empty()) {
+    for (const auto& lookup : lookups) {
+      auto it = py_char_map.find(lookup);
+      if (it == py_char_map.end())
+        continue;
+      for (uint32_t id : it->second)
+        add_id(id);
+    }
+  } else {
+    // 兼容旧数据（理论上 v3 不允许缺少 PY_CHAR）。
+    for (const auto& lookup : lookups) {
+      auto it = store.py_map().find(lookup);
+      if (it == store.py_map().end())
+        continue;
+      for (uint16_t t : it->second) {
+        uint32_t cp = store.TokenCp(t);
+        if (cp)
+          add_id(store.IdOfCp(cp));
+      }
+    }
   }
+
+  if (ids.empty())
+    return {};
+
   std::sort(ids.begin(), ids.end(), [&](uint32_t a, uint32_t b) {
-    return store.Hot(a).freq > store.Hot(b).freq;
+    uint32_t fa = store.Hot(a).freq;
+    uint32_t fb = store.Hot(b).freq;
+    if (fa != fb)
+      return fa > fb;
+    return a < b;
   });
-  if (limit > 0 && ids.size() > limit)
+  if (!unbounded && limit > 0 && ids.size() > limit)
     ids.resize(limit);
   return ids;
 }
-
 }  // namespace ids_reverse

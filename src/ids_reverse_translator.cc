@@ -25,6 +25,7 @@
 
 #include "ids_reverse_config.h"
 #include "ids_reverse_group.h"
+#include "ids_reverse_input.h"
 #include "ids_reverse_search.h"
 #include "ids_store.h"
 
@@ -223,384 +224,6 @@ struct EpochSet {
 };
 
 // ---------------------------------------------------------------------------
-// 双拼解码（flypy / zrm）
-// ---------------------------------------------------------------------------
-
-const char* SpInitMap(char c) {
-  switch (c) {
-    case 'v':
-      return "zh";
-    case 'i':
-      return "ch";
-    case 'u':
-      return "sh";
-    default:
-      return nullptr;
-  }
-}
-
-const char* SpInitialsMap(char c) {
-  switch (c) {
-    case 'v':
-      return "zh";
-    case 'i':
-      return "ch";
-    case 'u':
-      return "sh";
-    case 'a':
-      return "a";
-    case 'o':
-      return "o";
-    case 'e':
-      return "e";
-    default:
-      return nullptr;
-  }
-}
-
-const char* FlypyFinalMap(char c) {
-  switch (c) {
-    case 'q':
-      return "iu";
-    case 'w':
-      return "ei";
-    case 'e':
-      return "e";
-    case 'r':
-      return "uan";
-    case 'y':
-      return "un";
-    case 'u':
-      return "u";
-    case 'i':
-      return "i";
-    case 'p':
-      return "ie";
-    case 'a':
-      return "a";
-    case 'd':
-      return "ai";
-    case 'f':
-      return "en";
-    case 'g':
-      return "eng";
-    case 'h':
-      return "ang";
-    case 'j':
-      return "an";
-    case 'z':
-      return "ou";
-    case 'c':
-      return "ao";
-    case 'b':
-      return "in";
-    case 'n':
-      return "iao";
-    case 'm':
-      return "ian";
-    default:
-      return nullptr;
-  }
-}
-
-const char* ZrmFinalMap(char c) {
-  switch (c) {
-    case 'q':
-      return "iu";
-    case 'w':
-      return "ia";
-    case 'r':
-      return "uan";
-    case 'p':
-      return "un";
-    case 'u':
-      return "u";
-    case 'i':
-      return "i";
-    case 'f':
-      return "en";
-    case 'g':
-      return "eng";
-    case 'h':
-      return "ang";
-    case 'j':
-      return "an";
-    case 'k':
-      return "ao";
-    case 'l':
-      return "ai";
-    case 'z':
-      return "ou";
-    case 'c':
-      return "ao";
-    case 'b':
-      return "in";
-    case 'm':
-      return "ian";
-    default:
-      return nullptr;
-  }
-}
-
-bool IsIn(const char* init, std::initializer_list<const char*> list) {
-  for (const char* s : list) {
-    if (std::strcmp(init, s) == 0)
-      return true;
-  }
-  return false;
-}
-
-std::string DecodeFlypySyllable(const std::string& code) {
-  if (code.size() != 2)
-    return "";
-  char c1 = code[0];
-  char c2 = code[1];
-  if (c1 == 'a') {
-    if (c2 == 'a')
-      return "a";
-    if (c2 == 'i' || c2 == 'n' || c2 == 'o')
-      return std::string("a") + c2;
-    if (c2 == 'h')
-      return "ang";
-  } else if (c1 == 'o') {
-    if (c2 == 'o')
-      return "o";
-    if (c2 == 'u')
-      return "ou";
-  } else if (c1 == 'e') {
-    if (c2 == 'e')
-      return "e";
-    if (c2 == 'i' || c2 == 'n' || c2 == 'r')
-      return std::string("e") + c2;
-    if (c2 == 'g')
-      return "eng";
-  }
-  std::string init;
-  if (const char* m = SpInitMap(c1))
-    init = m;
-  else
-    init = std::string(1, c1);
-  const char* final = nullptr;
-  if (c2 == 'k') {
-    final =
-        IsIn(init.c_str(), {"zh", "ch", "sh", "g", "k", "h"}) ? "uai" : "ing";
-  } else if (c2 == 'l') {
-    final = IsIn(init.c_str(), {"zh", "ch", "sh", "g", "k", "h", "w"}) ? "uang"
-                                                                       : "iang";
-  } else if (c2 == 'x') {
-    final = IsIn(init.c_str(), {"zh", "ch", "sh", "g", "k", "h"}) ? "ua" : "ia";
-  } else if (c2 == 's') {
-    final = IsIn(init.c_str(), {"j", "q", "x"}) ? "iong" : "ong";
-  } else if (c2 == 't') {
-    final = "ue";
-  } else if (c2 == 'v') {
-    if (IsIn(init.c_str(), {"n", "l"}))
-      return init + "v";
-    if (IsIn(init.c_str(), {"j", "q", "x", "y"}))
-      return init + "u";
-    final = "ui";
-  } else if (c2 == 'o') {
-    final = IsIn(init.c_str(), {"b", "p", "m", "f"}) ? "o" : "uo";
-  } else {
-    final = FlypyFinalMap(c2);
-  }
-  if (!final)
-    return "";
-  if (IsIn(init.c_str(), {"j", "q", "x", "y"}) && std::string(final) == "ue")
-    return init + "ue";
-  if (IsIn(init.c_str(), {"l", "n"}) && std::string(final) == "ue")
-    return init + "ve";
-  return init + final;
-}
-
-std::string DecodeZrmSyllable(const std::string& code) {
-  if (code.size() != 2)
-    return "";
-  char c1 = code[0];
-  char c2 = code[1];
-  if (c1 == 'a') {
-    if (c2 == 'a')
-      return "a";
-    if (c2 == 'i' || c2 == 'n' || c2 == 'o')
-      return std::string("a") + c2;
-    if (c2 == 'h')
-      return "ang";
-  } else if (c1 == 'o') {
-    if (c2 == 'o')
-      return "o";
-    if (c2 == 'u')
-      return "ou";
-  } else if (c1 == 'e') {
-    if (c2 == 'e')
-      return "e";
-    if (c2 == 'i' || c2 == 'n' || c2 == 'r')
-      return std::string("e") + c2;
-    if (c2 == 'g')
-      return "eng";
-  }
-  std::string init;
-  if (const char* m = SpInitMap(c1))
-    init = m;
-  else
-    init = std::string(1, c1);
-  const char* final = nullptr;
-  if (c2 == 'y') {
-    final =
-        IsIn(init.c_str(), {"zh", "ch", "sh", "g", "k", "h"}) ? "uai" : "ing";
-  } else if (c2 == 'd') {
-    final =
-        IsIn(init.c_str(), {"zh", "ch", "sh", "g", "k", "h"}) ? "uang" : "iang";
-  } else if (c2 == 'w') {
-    final = IsIn(init.c_str(), {"zh", "ch", "sh", "g", "k", "h"}) ? "ua" : "ia";
-  } else if (c2 == 's') {
-    final = IsIn(init.c_str(), {"j", "q", "x"}) ? "iong" : "ong";
-  } else if (c2 == 't') {
-    final = "ue";
-  } else if (c2 == 'v') {
-    if (IsIn(init.c_str(), {"n", "l"}))
-      return init + "v";
-    if (IsIn(init.c_str(), {"j", "q", "x", "y"}))
-      return init + "u";
-    final = "ui";
-  } else if (c2 == 'o') {
-    final = IsIn(init.c_str(), {"b", "p", "m", "f"}) ? "o" : "uo";
-  } else {
-    final = ZrmFinalMap(c2);
-  }
-  if (!final)
-    return "";
-  return init + final;
-}
-
-bool DecodeShuangpinString(IdsStore& store,
-                           const std::string& s,
-                           const std::string& scheme,
-                           std::vector<std::string>* out) {
-  auto decoder = (scheme == "zrm") ? &DecodeZrmSyllable : &DecodeFlypySyllable;
-  std::vector<std::string> parts;
-  if (HasSeparator(s))
-    parts = SplitSeparator(s);
-  else
-    parts.push_back(s);
-  std::vector<std::string> res;
-  for (const auto& part : parts) {
-    size_t n_part = part.size();
-    size_t pairs = n_part / 2;
-    for (size_t i = 0; i < pairs; ++i) {
-      std::string pair = part.substr(i * 2, 2);
-      std::string syl = decoder(pair);
-      if (!syl.empty() && store.valid_pinyins().count(syl))
-        res.push_back(syl);
-      else
-        return false;
-    }
-    if (n_part % 2 == 1) {
-      if (pairs == 0) {
-        char rem = part[n_part - 1];
-        if (const char* m = SpInitialsMap(rem))
-          res.push_back(m);
-        else
-          res.push_back(std::string(1, rem));
-      }
-    }
-  }
-  out->swap(res);
-  return true;
-}
-
-// ---------------------------------------------------------------------------
-// 全拼最优切分
-// ---------------------------------------------------------------------------
-
-const hash_set<std::string>& ZeroInitials() {
-  static const hash_set<std::string> k = {"a",   "o",  "e",  "ai", "ao",  "an",
-                                          "ang", "ou", "er", "en", "eng", "ei"};
-  return k;
-}
-const hash_set<std::string>& Initials2() {
-  static const hash_set<std::string> k = {"zh", "ch", "sh"};
-  return k;
-}
-const hash_set<std::string>& Initials1() {
-  static const hash_set<std::string> k = {"b", "p", "m", "f", "d", "t", "n",
-                                          "l", "g", "k", "h", "j", "q", "x",
-                                          "r", "z", "c", "s", "y", "w"};
-  return k;
-}
-
-std::vector<std::string> SegmentPinyinOptimal(IdsStore& store,
-                                              const std::string& s) {
-  size_t n = s.size();
-  std::vector<std::string> result;
-  if (n == 0)
-    return result;
-  struct Memo {
-    bool set = false;
-    int cost = 0;
-    std::vector<std::string> segs;
-  };
-  std::vector<Memo> memo(n + 1);
-  std::function<void(size_t)> dfs = [&](size_t idx) {
-    if (idx >= n) {
-      memo[idx].set = true;
-      memo[idx].cost = 0;
-      memo[idx].segs.clear();
-      return;
-    }
-    if (memo[idx].set)
-      return;
-    int best_cost = 1000000000;
-    std::vector<std::string> best_segs;
-    size_t max_len = std::min<size_t>(6, n - idx);
-    bool found = false;
-    for (size_t l = max_len; l >= 1; --l) {
-      std::string sub = s.substr(idx, l);
-      bool is_valid = (store.valid_pinyins().count(sub) > 0) ||
-                      (store.py_map().count(sub) > 0);
-      bool is_single_init = (l == 1 && Initials1().count(sub)) ||
-                            (l == 2 && Initials2().count(sub));
-      if (is_valid || is_single_init) {
-        int step_cost = 0;
-        if (is_valid) {
-          step_cost = 10 - static_cast<int>(l);
-          if (ZeroInitials().count(sub) && idx > 0) {
-            char prev = s[idx - 1];
-            if (prev == 'n' || prev == 'g' || prev == 'r')
-              step_cost += 15;
-          }
-        } else {
-          step_cost = 30 + (idx < 2 ? 0 : static_cast<int>(idx * 2));
-        }
-        dfs(idx + l);
-        int total = step_cost + memo[idx + l].cost;
-        if (total < best_cost) {
-          best_cost = total;
-          found = true;
-          best_segs.clear();
-          best_segs.push_back(sub);
-          for (const auto& seg : memo[idx + l].segs)
-            best_segs.push_back(seg);
-        }
-      }
-    }
-    if (!found) {
-      std::string sub = s.substr(idx, 1);
-      dfs(idx + 1);
-      best_cost = 100 + memo[idx + 1].cost;
-      best_segs.clear();
-      best_segs.push_back(sub);
-      for (const auto& seg : memo[idx + 1].segs)
-        best_segs.push_back(seg);
-    }
-    memo[idx].set = true;
-    memo[idx].cost = best_cost;
-    memo[idx].segs.swap(best_segs);
-  };
-  dfs(0);
-  return memo[0].segs;
-}
-
-// ---------------------------------------------------------------------------
 // 拼音切分缓存与 matcher 缓存
 // ---------------------------------------------------------------------------
 
@@ -609,107 +232,8 @@ LruCache<std::string, std::vector<uint16_t>> g_prefix_cache(128);
 LruCache<std::string, std::vector<uint16_t>> g_matcher_cache(128);
 LruCache<std::string, std::map<uint32_t, int>> g_rank_cache(64);
 
-std::vector<std::string> SegmentAlphaString(IdsStore& store,
-                                            const std::string& chunk,
-                                            const std::string& mode) {
-  if (chunk.empty())
-    return {};
-  std::string key = chunk + ":" + mode;
-  if (const std::vector<std::string>* hit = g_seg_cache.Find(key))
-    return *hit;
-  const auto& py_map = store.py_map();
-  std::vector<std::string> items;
-  if (py_map.count(chunk) && (mode == "quanpin" || chunk.size() == 2)) {
-    items.push_back(chunk);
-    g_seg_cache.Put(key, items);
-    return items;
-  }
-  if (mode == "flypy" || mode == "zrm") {
-    // 2 字母编码优先按双拼解释，避免 "mn" 被全拼切分成 m + n。
-    if (chunk.size() == 2) {
-      std::vector<std::string> sp;
-      if (DecodeShuangpinString(store, chunk, mode, &sp) && !sp.empty()) {
-        g_seg_cache.Put(key, sp);
-        return sp;
-      }
-    }
-    // 先尝试全拼切分：若整个字符串能切成一串合法音节，则优先按全拼处理。
-    // 这样 Ikouhao / Inihao 这类全拼输入不会被误当成等长的双拼编码。
-    std::vector<std::string> segs = SegmentPinyinOptimal(store, chunk);
-    if (!segs.empty()) {
-      bool all_valid = true;
-      for (const auto& seg : segs) {
-        if (store.valid_pinyins().count(seg) == 0) {
-          all_valid = false;
-          break;
-        }
-      }
-      if (all_valid) {
-        g_seg_cache.Put(key, segs);
-        return segs;
-      }
-    }
-    std::vector<std::string> sp;
-    if (DecodeShuangpinString(store, chunk, mode, &sp) && !sp.empty()) {
-      g_seg_cache.Put(key, sp);
-      return sp;
-    }
-    if (!segs.empty()) {
-      g_seg_cache.Put(key, segs);
-      return segs;
-    }
-    items.push_back(chunk);
-  } else {
-    std::vector<std::string> segs = SegmentPinyinOptimal(store, chunk);
-    if (!segs.empty()) {
-      bool has_single_frag = false;
-      for (const auto& seg : segs) {
-        if (seg.size() == 1 && !store.valid_pinyins().count(seg)) {
-          has_single_frag = true;
-          break;
-        }
-      }
-      if ((has_single_frag || chunk.size() <= 4) && chunk.size() >= 2 &&
-          chunk.size() % 2 == 0) {
-        std::vector<std::string> sp;
-        if (DecodeShuangpinString(store, chunk, "flypy", &sp)) {
-          bool all_valid = !sp.empty();
-          for (const auto& seg : sp) {
-            if (!store.valid_pinyins().count(seg)) {
-              all_valid = false;
-              break;
-            }
-          }
-          if (all_valid) {
-            g_seg_cache.Put(key, sp);
-            return sp;
-          }
-        }
-        if (DecodeShuangpinString(store, chunk, "zrm", &sp)) {
-          bool all_valid = !sp.empty();
-          for (const auto& seg : sp) {
-            if (!store.valid_pinyins().count(seg)) {
-              all_valid = false;
-              break;
-            }
-          }
-          if (all_valid) {
-            g_seg_cache.Put(key, sp);
-            return sp;
-          }
-        }
-      }
-      g_seg_cache.Put(key, segs);
-      return segs;
-    }
-    items.push_back(chunk);
-  }
-  g_seg_cache.Put(key, items);
-  return items;
-}
-
 // O 模式当前 pending 段的多部件解析结果。
-// tokens 为拼音/双拼音节或单个汉字；开头的 - / + 会被跳过。
+// tokens 为拼音/输入码音节或单个汉字；开头的 - / + 会被跳过。
 struct PendingComponents {
   bool valid = false;
   std::vector<std::string> tokens;
@@ -783,7 +307,7 @@ bool IsComponentExpression(const std::string& text) {
 
 PendingComponents ParsePendingComponents(IdsStore& store,
                                          const std::string& pending,
-                                         const std::string& mode) {
+                                         const InputCodec& codec) {
   PendingComponents out;
   if (pending.empty())
     return out;
@@ -799,7 +323,7 @@ PendingComponents ParsePendingComponents(IdsStore& store,
   auto flush_ascii = [&]() -> bool {
     if (ascii.empty())
       return true;
-    std::vector<std::string> segs = SegmentAlphaString(store, ascii, mode);
+    std::vector<std::string> segs = codec.Segment(ascii);
     ascii.clear();
     for (const auto& seg : segs) {
       if (!seg.empty())
@@ -953,7 +477,7 @@ struct ParsedQuery {
 
 ParsedQuery ParseQuery(IdsStore& store,
                        const std::string& raw_query,
-                       const std::string& mode) {
+                       const InputCodec& codec) {
   std::string lower = AsciiLower(raw_query);
   ParsedQuery pq;
   std::vector<std::string> items;
@@ -961,12 +485,12 @@ ParsedQuery ParseQuery(IdsStore& store,
     for (const auto& part : SplitSeparator(lower)) {
       if (part.empty())
         continue;
-      std::vector<std::string> segs = SegmentAlphaString(store, part, mode);
+      std::vector<std::string> segs = codec.Segment(part);
       for (const auto& s : segs)
         items.push_back(s);
     }
   } else if (IsAsciiAlphaOnly(lower)) {
-    items = SegmentAlphaString(store, lower, mode);
+    items = codec.Segment(lower);
   } else {
     std::string cur;
     for (const auto& ch : Utf8Chars(lower)) {
@@ -974,7 +498,7 @@ ParsedQuery ParseQuery(IdsStore& store,
         cur += ch;
       } else {
         if (!cur.empty()) {
-          std::vector<std::string> segs = SegmentAlphaString(store, cur, mode);
+          std::vector<std::string> segs = codec.Segment(cur);
           for (const auto& s : segs)
             items.push_back(s);
           cur.clear();
@@ -983,7 +507,7 @@ ParsedQuery ParseQuery(IdsStore& store,
       }
     }
     if (!cur.empty()) {
-      std::vector<std::string> segs = SegmentAlphaString(store, cur, mode);
+      std::vector<std::string> segs = codec.Segment(cur);
       for (const auto& s : segs)
         items.push_back(s);
     }
@@ -1567,12 +1091,12 @@ LruCache<std::string, std::vector<uint32_t>> g_query_cache(256);
 std::vector<uint32_t> SearchComponents(IdsStore& store,
                                        const std::string& query_str,
                                        int max_results,
-                                       const std::string& mode,
+                                       const InputCodec& codec,
                                        const hash_set<int>* disabled_blocks) {
   if (query_str.empty())
     return {};
-  std::string cache_key =
-      query_str + ":" + std::to_string(max_results) + ":" + mode;
+  std::string cache_key = query_str + ":" + std::to_string(max_results) + ":" +
+                          std::to_string(codec.id());
   if (disabled_blocks && !disabled_blocks->empty()) {
     std::vector<int> ks(disabled_blocks->begin(), disabled_blocks->end());
     std::sort(ks.begin(), ks.end());
@@ -1587,7 +1111,7 @@ std::vector<uint32_t> SearchComponents(IdsStore& store,
   if (const std::vector<uint32_t>* hit = g_query_cache.Find(cache_key))
     return *hit;
 
-  ParsedQuery pq = ParseQuery(store, query_str, mode);
+  ParsedQuery pq = ParseQuery(store, query_str, codec);
   if (pq.order.empty())
     return {};
 
@@ -1828,20 +1352,10 @@ IdsReverseTranslator::IdsReverseTranslator(const rime::Ticket& ticket)
   LoadReverseConfig(ticket, &name_space_, &config_);
 }
 
-std::string IdsReverseTranslator::PinyinMode() {
-  std::string mode = config_.shuangpin_scheme;
-  if (engine_ && engine_->context()) {
-    rime::Context* ctx = engine_->context();
-    if (ctx->get_option("shuangpin_flypy") ||
-        ctx->get_option("double_pinyin")) {
-      mode = "flypy";
-    } else if (ctx->get_option("shuangpin_zrm")) {
-      mode = "zrm";
-    } else if (ctx->get_option("pinyin_quanpin")) {
-      mode = "quanpin";
-    }
-  }
-  return mode;
+const InputCodec& IdsReverseTranslator::Codec() {
+  if (!codec_)
+    codec_ = InputCodec::Get(IdsStore::Instance(), config_);
+  return *codec_;
 }
 
 bool IdsReverseTranslator::EnsureLoaded() {
@@ -1853,11 +1367,11 @@ bool IdsReverseTranslator::EnsureLoaded() {
 }
 
 std::vector<uint32_t> IdsReverseTranslator::Search(const std::string& query_raw,
-                                                   const std::string& mode) {
+                                                   const InputCodec& codec) {
   IdsStore& store = IdsStore::Instance();
   const hash_set<int>* disabled =
       config_.disabled_blocks_enabled ? &config_.disabled_blocks : nullptr;
-  return SearchComponents(store, query_raw, config_.max_results, mode,
+  return SearchComponents(store, query_raw, config_.max_results, codec,
                           disabled);
 }
 
@@ -1942,8 +1456,7 @@ rime::an<rime::Translation> IdsReverseTranslator::QuerySearch(
   if (!EnsureLoaded())
     return nullptr;
 
-  std::string mode = PinyinMode();
-  std::vector<uint32_t> results = Search(query_raw, mode);
+  std::vector<uint32_t> results = Search(query_raw, Codec());
   if (results.empty())
     return nullptr;
   return BuildSearchCandidates(results, prefix.empty() ? std::string() : input,
@@ -2043,10 +1556,24 @@ void IdsReverseTranslator::BuildMultiComponentCandidates(
       if (disabled && disabled->count(static_cast<int>(store.Hot(id).block)))
         return;
       opts.push_back({token, 0, store.Hot(id).freq});
+    } else if (store.valid_pinyins().count(token)) {
+      // Segment 解码出的标准拼音（不再当作输入码处理）。
+      std::vector<uint32_t> ids = GetPinyinCandidates(store, token, 80);
+      for (uint32_t id : ids) {
+        if (disabled && disabled->count(static_cast<int>(store.Hot(id).block)))
+          continue;
+        uint32_t cp = store.CpOfId(id);
+        if (!cp)
+          continue;
+        opts.push_back(
+            {CpToUtf8(cp), static_cast<int>(opts.size()), store.Hot(id).freq});
+        if (opts.size() >= kPerTokenLimit)
+          break;
+      }
     } else {
-      // 拼音/双拼音节，复用自带部件候选（已按字频排序）。
+      // 原始输入码片段：按编码前缀展开候选。
       std::vector<uint32_t> ids =
-          GetComponentCandidates(store, token, PinyinMode(), 80);
+          GetComponentCandidates(store, token, Codec(), 80);
       for (uint32_t id : ids) {
         if (disabled && disabled->count(static_cast<int>(store.Hot(id).block)))
           continue;
@@ -2256,14 +1783,13 @@ rime::an<rime::Translation> IdsReverseTranslator::QueryHybrid(
     size_t run_start = 0, run_end = 0;
     if (FindLastAsciiRun(pending, &run_start, &run_end)) {
       std::string run = pending.substr(run_start, run_end - run_start);
-      std::vector<std::string> tokens =
-          SegmentAlphaString(store, run, PinyinMode());
+      std::vector<std::string> tokens = Codec().Segment(run);
       if (tokens.size() >= 2) {
         BuildMultiComponentCandidates(store, tokens, segment,
                                       translation.get());
       } else if (tokens.size() == 1) {
         std::vector<uint32_t> results =
-            GetComponentCandidates(store, tokens[0], PinyinMode(), 80);
+            GetComponentCandidates(store, run, Codec(), 80);
         BuildComponentCandidates(store, results, segment, translation.get());
       }
     }
@@ -2281,13 +1807,13 @@ rime::an<rime::Translation> IdsReverseTranslator::QueryHybrid(
     if (!pending.empty())
       comp_list.push_back(pending);
     std::vector<uint32_t> results = SearchHybrid(
-        store, comp_list, PinyinMode(), config_.max_results,
+        store, comp_list, Codec(), config_.max_results,
         config_.disabled_blocks_enabled ? &config_.disabled_blocks : nullptr,
         IsRpnNotation(config_));
     BuildResultCandidates(store, results, segment, pending, translation.get());
-  } else if (!pending.empty() && has_component) {
-    PendingComponents parsed =
-        ParsePendingComponents(store, pending, PinyinMode());
+  } else if (!pending.empty() && pending != "-" && pending != "+" &&
+             pending != "!" && has_component) {
+    PendingComponents parsed = ParsePendingComponents(store, pending, Codec());
     if (parsed.valid && parsed.tokens.size() >= 2) {
       // 多音节/多汉字连写：一次给出可加入多个部件的组合候选。
       BuildMultiComponentCandidates(store, parsed.tokens, segment,
@@ -2301,9 +1827,9 @@ rime::an<rime::Translation> IdsReverseTranslator::QueryHybrid(
         cand->set_quality(100.0);
         translation->Append(cand);
       } else {
-        // ! / - / + 后的拼音仍走正常部件选字流程。
+        // ! / - / + 后的输入码仍走正常部件选字流程。
         std::vector<uint32_t> results =
-            GetComponentCandidates(store, parsed.tokens[0], PinyinMode(), 80);
+            GetComponentCandidates(store, pending, Codec(), 80);
         BuildComponentCandidates(store, results, segment, translation.get());
       }
     } else if (IsComponentExpression(pending)) {
@@ -2314,7 +1840,7 @@ rime::an<rime::Translation> IdsReverseTranslator::QueryHybrid(
       translation->Append(cand);
     } else {
       std::vector<uint32_t> results =
-          GetComponentCandidates(store, pending, PinyinMode(), 80);
+          GetComponentCandidates(store, pending, Codec(), 80);
       BuildComponentCandidates(store, results, segment, translation.get());
     }
   }

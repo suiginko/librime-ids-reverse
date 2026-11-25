@@ -1022,144 +1022,6 @@ local function ensure_store(config)
   return s
 end
 
--- ---------------------------------------------------------------------------
--- 拼音：全拼切分与双拼解码
--- ---------------------------------------------------------------------------
-
-local ZERO_INITIALS = {
-  ["a"] = true, ["o"] = true, ["e"] = true, ["ai"] = true, ["ao"] = true,
-  ["an"] = true, ["ang"] = true, ["ou"] = true, ["er"] = true, ["en"] = true,
-  ["eng"] = true, ["ei"] = true,
-}
-local INITIALS2 = { ["zh"] = true, ["ch"] = true, ["sh"] = true }
-local INITIALS1 = {
-  ["b"] = true, ["p"] = true, ["m"] = true, ["f"] = true, ["d"] = true,
-  ["t"] = true, ["n"] = true, ["l"] = true, ["g"] = true, ["k"] = true,
-  ["h"] = true, ["j"] = true, ["q"] = true, ["x"] = true, ["r"] = true,
-  ["z"] = true, ["c"] = true, ["s"] = true, ["y"] = true, ["w"] = true,
-}
-
-local FLYPY_FINALS = {
-  q = "iu", w = "ei", e = "e", r = "uan", y = "un", u = "u", i = "i",
-  p = "ie", a = "a", d = "ai", f = "en", g = "eng", h = "ang", j = "an",
-  z = "ou", c = "ao", b = "in", n = "iao", m = "ian",
-}
-local ZRM_FINALS = {
-  q = "iu", w = "ia", r = "uan", p = "un", u = "u", i = "i", f = "en",
-  g = "eng", h = "ang", j = "an", k = "ao", l = "ai", z = "ou", c = "ao",
-  b = "in", m = "ian",
-}
-
-local function sp_init(c)
-  if c == "v" then return "zh" end
-  if c == "i" then return "ch" end
-  if c == "u" then return "sh" end
-  return nil
-end
-
-local function sp_initials(c)
-  if c == "v" then return "zh" end
-  if c == "i" then return "ch" end
-  if c == "u" then return "sh" end
-  if c == "a" then return "a" end
-  if c == "o" then return "o" end
-  if c == "e" then return "e" end
-  return nil
-end
-
-local function is_in(value, list)
-  for i = 1, #list do
-    if value == list[i] then return true end
-  end
-  return false
-end
-
-local function decode_flypy_syllable(code)
-  if #code ~= 2 then return "" end
-  local c1, c2 = code:sub(1, 1), code:sub(2, 2)
-  if c1 == "a" then
-    if c2 == "a" then return "a" end
-    if c2 == "i" or c2 == "n" or c2 == "o" then return "a" .. c2 end
-    if c2 == "h" then return "ang" end
-  elseif c1 == "o" then
-    if c2 == "o" then return "o" end
-    if c2 == "u" then return "ou" end
-  elseif c1 == "e" then
-    if c2 == "e" then return "e" end
-    if c2 == "i" or c2 == "n" or c2 == "r" then return "e" .. c2 end
-    if c2 == "g" then return "eng" end
-  end
-  local init = sp_init(c1) or c1
-  local final
-  if c2 == "k" then
-    final = is_in(init, { "zh", "ch", "sh", "g", "k", "h" }) and "uai" or "ing"
-  elseif c2 == "l" then
-    final = is_in(init, { "zh", "ch", "sh", "g", "k", "h", "w" }) and "uang" or "iang"
-  elseif c2 == "x" then
-    final = is_in(init, { "zh", "ch", "sh", "g", "k", "h" }) and "ua" or "ia"
-  elseif c2 == "s" then
-    final = is_in(init, { "j", "q", "x" }) and "iong" or "ong"
-  elseif c2 == "t" then
-    final = "ue"
-  elseif c2 == "v" then
-    if is_in(init, { "n", "l" }) then return init .. "v" end
-    if is_in(init, { "j", "q", "x", "y" }) then return init .. "u" end
-    final = "ui"
-  elseif c2 == "o" then
-    final = is_in(init, { "b", "p", "m", "f" }) and "o" or "uo"
-  else
-    final = FLYPY_FINALS[c2]
-  end
-  if not final then return "" end
-  if is_in(init, { "j", "q", "x", "y" }) and final == "ue" then
-    return init .. "ue"
-  end
-  if is_in(init, { "l", "n" }) and final == "ue" then
-    return init .. "ve"
-  end
-  return init .. final
-end
-
-local function decode_zrm_syllable(code)
-  if #code ~= 2 then return "" end
-  local c1, c2 = code:sub(1, 1), code:sub(2, 2)
-  if c1 == "a" then
-    if c2 == "a" then return "a" end
-    if c2 == "i" or c2 == "n" or c2 == "o" then return "a" .. c2 end
-    if c2 == "h" then return "ang" end
-  elseif c1 == "o" then
-    if c2 == "o" then return "o" end
-    if c2 == "u" then return "ou" end
-  elseif c1 == "e" then
-    if c2 == "e" then return "e" end
-    if c2 == "i" or c2 == "n" or c2 == "r" then return "e" .. c2 end
-    if c2 == "g" then return "eng" end
-  end
-  local init = sp_init(c1) or c1
-  local final
-  if c2 == "y" then
-    final = is_in(init, { "zh", "ch", "sh", "g", "k", "h" }) and "uai" or "ing"
-  elseif c2 == "d" then
-    final = is_in(init, { "zh", "ch", "sh", "g", "k", "h" }) and "uang" or "iang"
-  elseif c2 == "w" then
-    final = is_in(init, { "zh", "ch", "sh", "g", "k", "h" }) and "ua" or "ia"
-  elseif c2 == "s" then
-    final = is_in(init, { "j", "q", "x" }) and "iong" or "ong"
-  elseif c2 == "t" then
-    final = "ue"
-  elseif c2 == "v" then
-    if is_in(init, { "n", "l" }) then return init .. "v" end
-    if is_in(init, { "j", "q", "x", "y" }) then return init .. "u" end
-    final = "ui"
-  elseif c2 == "o" then
-    final = is_in(init, { "b", "p", "m", "f" }) and "o" or "uo"
-  else
-    final = ZRM_FINALS[c2]
-  end
-  if not final then return "" end
-  return init .. final
-end
-
 local function has_separator(s)
   return s:find("['/._ \t\r\n]") ~= nil
 end
@@ -1170,96 +1032,676 @@ local function split_separator(s)
   return parts
 end
 
-local function decode_shuangpin_string(store, s, scheme)
-  local decoder = scheme == "zrm" and decode_zrm_syllable or decode_flypy_syllable
-  local parts = has_separator(s) and split_separator(s) or { s }
-  local res = {}
-  for _, part in ipairs(parts) do
-    local n = #part
-    local pair_count = n // 2
-    for i = 0, pair_count - 1 do
-      local syl = decoder(part:sub(i * 2 + 1, i * 2 + 2))
-      if syl ~= "" and store.valid_pinyins[syl] then
-        res[#res + 1] = syl
+local build_codec
+local get_codec
+do
+  -- ---------------------------------------------------------------------------
+  -- 输入编码：Rime 拼写代数（spelling algebra）
+  --
+  -- `ids_reverse/algebra` 中的规则方向是「标准拼音 → 输入码」。这里与 Rime
+  -- 构建 prism 的方式一致：先把规则应用到无调全拼音节表，得到「输入码 →
+  -- 标准拼音」映射，再在映射上做切分与查询。
+  -- ---------------------------------------------------------------------------
+
+  local SPELL_NORMAL = 0
+  local SPELL_FUZZY = 1
+  local SPELL_ABBREV = 2
+  local SPELL_COMPLETION = 3
+  local SPELL_AMBIGUOUS = 4
+  local SPELL_PENALTY = -0.6931471805599453   -- log(0.5)
+  local SPELL_CORRECTION_PENALTY = -4.605170185988091  -- log(0.01)
+
+  local function utf8_codepoints(s)
+    local out = {}
+    for _, cp in utf8.codes(s) do out[#out + 1] = cp end
+    return out
+  end
+
+  -- --- 极简 Boost.Regex 子集 -------------------------------------------------
+  -- 支持：^ $ . [...] [^...] 转义 捕获组 (?:...) | * + ? {n,m} 以及 $1..$9/$&。
+
+  local function compile_pattern(pat)
+    local pos = 1
+    local group_count = 0
+
+    local function at() return pat:sub(pos, pos) end
+    local function advance() pos = pos + 1 end
+
+    local parse_alt
+
+    local function parse_class()
+      local neg = false
+      if at() == "^" then neg = true; advance() end
+      local items = {}
+      local first = true
+      while pos <= #pat do
+        local c = at()
+        if c == "]" and not first then advance(); break end
+        first = false
+        if c == "\\" then
+          advance()
+          local e = at(); advance()
+          items[#items + 1] = { e:byte(), e:byte() }
+        else
+          advance()
+          if at() == "-" and pos + 1 <= #pat
+             and pat:sub(pos + 1, pos + 1) ~= "]" then
+            advance()
+            local hi = at(); advance()
+            if hi == "\\" then hi = at(); advance() end
+            items[#items + 1] = { c:byte(), hi:byte() }
+          else
+            items[#items + 1] = { c:byte(), c:byte() }
+          end
+        end
+      end
+      return { t = "class", neg = neg, items = items }
+    end
+
+    local function parse_atom()
+      local c = at()
+      if c == "(" then
+        advance()
+        local cap = true
+        if at() == "?" then
+          advance()
+          if at() == ":" then advance(); cap = false end
+        end
+        local idx = nil
+        if cap then
+          group_count = group_count + 1
+          idx = group_count
+        end
+        local node = parse_alt()
+        if at() == ")" then advance() end
+        return { t = "group", idx = idx, node = node }
+      elseif c == "[" then
+        advance()
+        return parse_class()
+      elseif c == "." then
+        advance()
+        return { t = "any" }
+      elseif c == "^" then
+        advance()
+        return { t = "bol" }
+      elseif c == "$" then
+        advance()
+        return { t = "eol" }
+      elseif c == "\\" then
+        advance()
+        local e = at(); advance()
+        return { t = "char", c = e:byte() }
       else
+        advance()
+        return { t = "char", c = c:byte() }
+      end
+    end
+
+    local function parse_repeat()
+      local node = parse_atom()
+      local c = at()
+      local min, max
+      if c == "*" then
+        min, max = 0, math.huge; advance()
+      elseif c == "+" then
+        min, max = 1, math.huge; advance()
+      elseif c == "?" then
+        min, max = 0, 1; advance()
+      elseif c == "{" then
+        local close = pat:find("}", pos, true)
+        if close then
+          local spec = pat:sub(pos + 1, close - 1)
+          local a, b = spec:match("^(%d+),(%d+)$")
+          if a then
+            min, max = tonumber(a), tonumber(b)
+          else
+            local n = spec:match("^(%d+)$")
+            if n then min, max = tonumber(n), tonumber(n) end
+          end
+          if min then pos = close + 1 end
+        end
+      end
+      if not min then return node end
+      return { t = "rep", node = node, min = min, max = max }
+    end
+
+    local function parse_seq()
+      local list = {}
+      while pos <= #pat do
+        local c = at()
+        if c == "|" or c == ")" then break end
+        list[#list + 1] = parse_repeat()
+      end
+      return { t = "seq", list = list }
+    end
+
+    parse_alt = function()
+      local list = { parse_seq() }
+      while at() == "|" do
+        advance()
+        list[#list + 1] = parse_seq()
+      end
+      if #list == 1 then return list[1] end
+      return { t = "alt", list = list }
+    end
+
+    return parse_alt()
+  end
+
+  local function match_node(node, s, pos, caps, k)
+    local t = node.t
+    if t == "char" then
+      if pos <= #s and s:byte(pos) == node.c then return k(pos + 1, caps) end
+      return nil
+    elseif t == "any" then
+      if pos <= #s then return k(pos + 1, caps) end
+      return nil
+    elseif t == "class" then
+      if pos > #s then return nil end
+      local b = s:byte(pos)
+      local hit = false
+      for _, r in ipairs(node.items) do
+        if b >= r[1] and b <= r[2] then hit = true; break end
+      end
+      if node.neg then hit = not hit end
+      if hit then return k(pos + 1, caps) end
+      return nil
+    elseif t == "bol" then
+      if pos == 1 then return k(pos, caps) end
+      return nil
+    elseif t == "eol" then
+      if pos == #s + 1 then return k(pos, caps) end
+      return nil
+    elseif t == "seq" then
+      local list = node.list
+      local function step(i, p, c)
+        if i > #list then return k(p, c) end
+        return match_node(list[i], s, p, c, function(np, nc)
+          return step(i + 1, np, nc)
+        end)
+      end
+      return step(1, pos, caps)
+    elseif t == "alt" then
+      for _, sub in ipairs(node.list) do
+        local r1, r2 = match_node(sub, s, pos, caps, k)
+        if r1 then return r1, r2 end
+      end
+      return nil
+    elseif t == "group" then
+      return match_node(node.node, s, pos, caps, function(np, nc)
+        if node.idx then
+          local nc2 = {}
+          for kk, vv in pairs(nc) do nc2[kk] = vv end
+          nc2[node.idx] = { pos, np }
+          nc = nc2
+        end
+        return k(np, nc)
+      end)
+    elseif t == "rep" then
+      local function rep(count, p, c)
+        if count < node.max then
+          local r1, r2 = match_node(node.node, s, p, c, function(np, nc)
+            if np == p then return nil end
+            return rep(count + 1, np, nc)
+          end)
+          if r1 then return r1, r2 end
+        end
+        if count >= node.min then return k(p, c) end
         return nil
       end
+      return rep(0, pos, caps)
     end
-    if n % 2 == 1 then
-      if pair_count == 0 then
-        local rem = part:sub(n, n)
-        res[#res + 1] = sp_initials(rem) or rem
+    return nil
+  end
+
+  local function match_at(ast, s, start, full)
+    local k
+    if full then
+      k = function(p, c)
+        if p == #s + 1 then return p, c end
+        return nil
+      end
+    else
+      k = function(p, c) return p, c end
+    end
+    return match_node(ast, s, start, {}, k)
+  end
+
+  local function expand_replacement(repl, s, start, stop, caps)
+    return (repl:gsub("%$([%d&])", function(n)
+      if n == "&" then return s:sub(start, stop - 1) end
+      local c = caps[tonumber(n)]
+      if c then return s:sub(c[1], c[2] - 1) end
+      return ""
+    end))
+  end
+
+  local function regex_replace(ast, repl, subject)
+    local out = {}
+    local pos = 1
+    local last = 1
+    local changed = false
+    while pos <= #subject + 1 do
+      local e, caps = match_at(ast, subject, pos, false)
+      if e then
+        out[#out + 1] = subject:sub(last, pos - 1)
+        out[#out + 1] = expand_replacement(repl, subject, pos, e, caps)
+        last = e
+        changed = true
+        if e > pos then pos = e else pos = pos + 1 end
+      else
+        pos = pos + 1
+      end
+    end
+    out[#out + 1] = subject:sub(last)
+    return table.concat(out), changed
+  end
+
+  local function regex_full(ast, subject)
+    return match_at(ast, subject, 1, true) ~= nil
+  end
+
+  -- --- 拼写代数规则 ----------------------------------------------------------
+
+  local function split_formula(s, sep)
+    local out = {}
+    local start = 1
+    while true do
+      local i = s:find(sep, start, true)
+      if not i then
+        out[#out + 1] = s:sub(start)
+        break
+      end
+      out[#out + 1] = s:sub(start, i - 1)
+      start = i + 1
+    end
+    return out
+  end
+
+  local function compile_rule(formula)
+    local sep = formula:find("[^a-z]")
+    if not sep then return nil end
+    local parts = split_formula(formula, formula:sub(sep, sep))
+    local op = parts[1]
+    if op == "xlit" then
+      if #parts < 3 then return nil end
+      local map = {}
+      local left = utf8_codepoints(parts[2])
+      local right = utf8_codepoints(parts[3])
+      for i = 1, math.min(#left, #right) do map[left[i]] = right[i] end
+      return { kind = "xlit", map = map, addition = true, deletion = true }
+    elseif op == "reorder" then
+      if #parts < 2 then return nil end
+      local order = {}
+      local cps = utf8_codepoints(parts[2])
+      for i, cp in ipairs(cps) do order[cp] = i end
+      return { kind = "reorder", order = order,
+               dedup = parts[3] == "dedup",
+               addition = true, deletion = true }
+    elseif op == "erase" then
+      if #parts < 2 or parts[2] == "" then return nil end
+      return { kind = "regex", ast = compile_pattern(parts[2]), repl = "",
+               addition = false, deletion = true, erase = true }
+    elseif op == "xform" or op == "derive" or op == "fuzz" or op == "abbrev" then
+      if #parts < 3 or parts[2] == "" then return nil end
+      local kind = "regex"
+      local typ = SPELL_NORMAL
+      local cred = 0
+      local addition, deletion = true, true
+      if op == "derive" or op == "fuzz" or op == "abbrev" then
+        deletion = false
+      end
+      if op == "fuzz" then
+        typ, cred = SPELL_FUZZY, SPELL_PENALTY
+      elseif op == "abbrev" then
+        typ, cred = SPELL_ABBREV, SPELL_PENALTY
+      elseif op == "derive" and parts[4] == "fuzz" then
+        typ, cred = SPELL_FUZZY, SPELL_PENALTY
+      elseif op == "derive" and parts[4] == "abbrev" then
+        typ, cred = SPELL_ABBREV, SPELL_PENALTY
+      elseif op == "derive" and parts[4] == "correction" then
+        cred = SPELL_CORRECTION_PENALTY
+      end
+      return { kind = kind, ast = compile_pattern(parts[2]), repl = parts[3],
+               type = typ, cred = cred, addition = addition,
+               deletion = deletion }
+    end
+    return nil
+  end
+
+  local function apply_reorder(rule, key)
+    local cps = utf8_codepoints(key)
+    local counts = {}
+    local group = {}
+    local out = {}
+    local changed = false
+
+    local function flush()
+      if #group == 0 then return end
+      local keys = {}
+      for cp in pairs(counts) do keys[#keys + 1] = cp end
+      table.sort(keys, function(a, b) return rule.order[a] < rule.order[b] end)
+      for _, cp in ipairs(keys) do
+        local n = counts[cp]
+        if rule.dedup then n = 1 end
+        for _ = 1, n do out[#out + 1] = utf8.char(cp) end
+      end
+      counts = {}
+      group = {}
+    end
+
+    for _, cp in ipairs(cps) do
+      if rule.order[cp] then
+        counts[cp] = (counts[cp] or 0) + 1
+        group[#group + 1] = cp
+      else
+        local before = #out
+        flush()
+        out[#out + 1] = utf8.char(cp)
+        if #out ~= before + 1 then changed = true end
+      end
+    end
+    local before = #out
+    flush()
+    if #out ~= before then changed = true end
+    if not changed then return nil end
+    return table.concat(out)
+  end
+
+  local function apply_rule_to_key(rule, key)
+    if rule.kind == "xlit" then
+      local out = {}
+      local changed = false
+      for _, cp in ipairs(utf8_codepoints(key)) do
+        local mapped = rule.map[cp]
+        if mapped then
+          out[#out + 1] = utf8.char(mapped)
+          changed = true
+        else
+          out[#out + 1] = utf8.char(cp)
+        end
+      end
+      if not changed then return nil end
+      return table.concat(out)
+    elseif rule.kind == "reorder" then
+      return apply_reorder(rule, key)
+    elseif rule.erase then
+      if regex_full(rule.ast, key) then return "" end
+      return nil
+    else
+      local out, changed = regex_replace(rule.ast, rule.repl, key)
+      if not changed or out == key then return nil end
+      return out
+    end
+  end
+
+  local function merge_spelling_values(dest, key, delta, values)
+    local list = dest[key]
+    if not list then list = {}; dest[key] = list end
+    for _, v in ipairs(values) do
+      local y = { str = v.str, type = v.type, cred = v.cred }
+      if delta.type > y.type then y.type = delta.type end
+      y.cred = y.cred + delta.cred
+      local found
+      for _, e in ipairs(list) do
+        if e.str == y.str then found = e; break end
+      end
+      if not found then
+        list[#list + 1] = y
+      else
+        if found.type == y.type then
+          -- is_correction 合并不影响输入编码排序。
+        elseif y.type < found.type then
+          found.type = y.type
+        end
+        if y.cred > found.cred then found.cred = y.cred end
       end
     end
   end
-  return res
-end
 
-local function segment_pinyin_optimal(store, s)
-  local n = #s
-  if n == 0 then return {} end
-  local memo = {}
-  for i = 0, n do memo[i] = { set = false, cost = 0, segs = {} } end
-
-  local function dfs(idx)
-    if idx >= n then
-      memo[idx].set = true
-      memo[idx].cost = 0
-      memo[idx].segs = {}
-      return
-    end
-    if memo[idx].set then return end
-    local best_cost = 1000000000
-    local best_segs = {}
-    local max_len = math.min(6, n - idx)
-    local found = false
-    for l = max_len, 1, -1 do
-      local sub = s:sub(idx + 1, idx + l)
-      local is_valid = store.valid_pinyins[sub] == true
-                    or store.py_map[sub] ~= nil
-      local is_single_init = (l == 1 and INITIALS1[sub])
-                          or (l == 2 and INITIALS2[sub])
-      if is_valid or is_single_init then
-        local step_cost
-        if is_valid then
-          step_cost = 10 - l
-          if ZERO_INITIALS[sub] and idx > 0 then
-            local prev = s:sub(idx, idx)
-            if prev == "n" or prev == "g" or prev == "r" then
-              step_cost = step_cost + 15
-            end
+  local function apply_projection(script, rules)
+    for _, rule in ipairs(rules) do
+      local temp = {}
+      for key, values in pairs(script) do
+        local newkey = apply_rule_to_key(rule, key)
+        if newkey ~= nil then
+          if not rule.deletion then
+            merge_spelling_values(temp, key, { type = SPELL_NORMAL, cred = 0 },
+                                  values)
+          end
+          if rule.addition and newkey ~= "" then
+            merge_spelling_values(temp, newkey,
+                                  { type = rule.type or SPELL_NORMAL,
+                                    cred = rule.cred or 0 }, values)
           end
         else
-          step_cost = 30 + (idx < 2 and 0 or idx * 2)
+          merge_spelling_values(temp, key, { type = SPELL_NORMAL, cred = 0 },
+                                values)
         end
-        dfs(idx + l)
-        local total = step_cost + memo[idx + l].cost
-        if total < best_cost then
-          best_cost = total
-          found = true
-          best_segs = { sub }
-          for _, seg in ipairs(memo[idx + l].segs) do
-            best_segs[#best_segs + 1] = seg
+      end
+      script = temp
+    end
+    return script
+  end
+
+  local function spelling_better(a, b)
+    if a.type ~= b.type then return a.type < b.type end
+    if a.cred ~= b.cred then return a.cred > b.cred end
+    return a.str < b.str
+  end
+
+  local function type_penalty(typ)
+    if typ == SPELL_FUZZY then return 6.0 end
+    if typ == SPELL_ABBREV then return 12.0 end
+    if typ == SPELL_COMPLETION then return 18.0 end
+    if typ == SPELL_AMBIGUOUS then return 24.0 end
+    return 0.0
+  end
+
+  local function preferred_token(code, list)
+    local normal, normal_count = nil, 0
+    for _, e in ipairs(list) do
+      if e.type == SPELL_NORMAL then
+        normal_count = normal_count + 1
+        normal = e
+      end
+    end
+    if normal_count == 1 then return normal.str end
+    if #list == 1 then return list[1].str end
+    return code
+  end
+
+  local Codec = {}
+  Codec.__index = Codec
+
+  function Codec:decode_exact(code)
+    local list = self.entries[ascii_lower(code)]
+    if not list then return {} end
+    local out = {}
+    for i, e in ipairs(list) do out[i] = e.str end
+    return out
+  end
+
+  function Codec:decode_prefix(prefix)
+    prefix = ascii_lower(prefix)
+    if prefix == "" then return {} end
+    local lo, hi = 1, #self.codes
+    while lo <= hi do
+      local mid = (lo + hi) // 2
+      if self.codes[mid] < prefix then lo = mid + 1 else hi = mid - 1 end
+    end
+    local out, seen = {}, {}
+    local matched = 0
+    for i = lo, #self.codes do
+      local code = self.codes[i]
+      if code:sub(1, #prefix) ~= prefix then break end
+      for _, e in ipairs(self.entries[code]) do
+        if not seen[e.str] then
+          seen[e.str] = true
+          out[#out + 1] = e.str
+        end
+      end
+      matched = matched + 1
+      if matched >= 2048 then break end
+    end
+    return out
+  end
+
+  function Codec:normalize_term(term)
+    local decoded = self:decode_exact(term)
+    if #decoded > 0 then return decoded[1] end
+    return term
+  end
+
+  function Codec:has_code_prefix(prefix)
+    if prefix == "" then return false end
+    local lo, hi = 1, #self.codes
+    while lo <= hi do
+      local mid = (lo + hi) // 2
+      if self.codes[mid] < prefix then lo = mid + 1 else hi = mid - 1 end
+    end
+    local code = self.codes[lo]
+    return code ~= nil and #code >= #prefix and code:sub(1, #prefix) == prefix
+  end
+
+  function Codec:segment_chunk(chunk)
+    local n = #chunk
+    if n == 0 then return {} end
+
+    -- 整段输入必须是「某个编码序列的前缀」，否则严格按代数拒绝。
+    local prefix_ok = {}
+    prefix_ok[n + 1] = true
+    for i = n, 1, -1 do
+      local ok = false
+      local max_len = math.min(self.max_len, n - i + 1)
+      for len = 1, max_len do
+        local code = chunk:sub(i, i + len - 1)
+        if self.entries[code] and prefix_ok[i + len] then
+          ok = true
+          break
+        end
+      end
+      if not ok and self:has_code_prefix(chunk:sub(i)) then ok = true end
+      prefix_ok[i] = ok
+    end
+    if not prefix_ok[1] then return {} end
+
+    local memo = {}
+    memo[n + 1] = { cost = 0, next = n + 1, token = "" }
+    for i = n, 1, -1 do
+      local best
+      if memo[i + 1] then
+        best = { cost = 1000 + memo[i + 1].cost, next = i + 1,
+                 token = chunk:sub(i, i) }
+      end
+      local max_len = math.min(self.max_len, n - i + 1)
+      for len = max_len, 1, -1 do
+        local code = chunk:sub(i, i + len - 1)
+        local list = self.entries[code]
+        if list and memo[i + len] then
+          local e = list[1]
+          local cost = (10 - len) + type_penalty(e.type) - e.cred
+                       + memo[i + len].cost
+          if not best or cost < best.cost then
+            best = { cost = cost, next = i + len,
+                     token = preferred_token(code, list) }
           end
         end
       end
-    end
-    if not found then
-      local sub = s:sub(idx + 1, idx + 1)
-      dfs(idx + 1)
-      best_cost = 100 + memo[idx + 1].cost
-      best_segs = { sub }
-      for _, seg in ipairs(memo[idx + 1].segs) do
-        best_segs[#best_segs + 1] = seg
+      if memo[n + 1] and self:has_code_prefix(chunk:sub(i)) then
+        local cost = 50 + memo[n + 1].cost
+        if not best or cost < best.cost then
+          best = { cost = cost, next = n + 1, token = chunk:sub(i) }
+        end
       end
+      memo[i] = best
     end
-    memo[idx].set = true
-    memo[idx].cost = best_cost
-    memo[idx].segs = best_segs
+    local tokens = {}
+    local pos = 1
+    while pos <= n and memo[pos] and memo[pos].next > pos do
+      if memo[pos].token ~= "" then tokens[#tokens + 1] = memo[pos].token end
+      pos = memo[pos].next
+    end
+    if pos <= n then return { chunk } end
+    return tokens
   end
 
-  dfs(0)
-  return memo[0].segs
+  function Codec:segment(input)
+    if input == "" then return {} end
+    if has_separator(input) then
+      local out = {}
+      for _, part in ipairs(split_separator(input)) do
+        local sub = self:segment(part)
+        for _, t in ipairs(sub) do out[#out + 1] = t end
+      end
+      return out
+    end
+    return self:segment_chunk(ascii_lower(input))
+  end
+
+  build_codec = function(store, rule_formulas)
+    local rules = {}
+    for _, formula in ipairs(rule_formulas or {}) do
+      local rule = compile_rule(formula)
+      if rule then
+        rules[#rules + 1] = rule
+      else
+        print("ids_reverse: unsupported spelling algebra rule: " .. formula)
+      end
+    end
+
+    local syllables = {}
+    for py in pairs(store.valid_pinyins) do syllables[#syllables + 1] = py end
+    table.sort(syllables)
+
+    local script = {}
+    for _, py in ipairs(syllables) do
+      script[py] = { { str = py, type = SPELL_NORMAL, cred = 0 } }
+    end
+    script = apply_projection(script, rules)
+
+    local entries, codes = {}, {}
+    local max_len = 0
+    for code, values in pairs(script) do
+      if code ~= "" then
+        local best = {}
+        for _, v in ipairs(values) do
+          local cur = best[v.str]
+          if not cur or spelling_better(v, cur) then best[v.str] = v end
+        end
+        local list = {}
+        for _, v in pairs(best) do list[#list + 1] = v end
+        table.sort(list, spelling_better)
+        entries[code] = list
+        codes[#codes + 1] = code
+        if #code > max_len then max_len = #code end
+      end
+    end
+    table.sort(codes)
+
+    local codec = setmetatable({
+      entries = entries,
+      codes = codes,
+      max_len = max_len,
+      id = table.concat(rule_formulas or {}, "\30"),
+    }, Codec)
+    return codec
+  end
+
+  local codec_cache = {}
+  get_codec = function(store, config)
+    local rules = config and config.algebra or {}
+    local key = table.concat(rules, "\30") .. "\31"
+                .. tostring(store and store.num_chars or 0)
+    local codec = codec_cache[key]
+    if not codec then
+      codec = build_codec(store, rules)
+      codec.id = key
+      codec_cache[key] = codec
+    end
+    return codec
+  end
+
 end
 
 local seg_cache = {}
@@ -1294,89 +1736,14 @@ local function clear_query_caches()
   end
 end
 
-local function segment_alpha_string(store, chunk, mode)
+local function segment_alpha_string(store, chunk, codec)
   if chunk == "" then return {} end
-  local key = chunk .. ":" .. mode
+  local key = codec.id .. ":" .. chunk
   local hit = cache_get(seg_cache, key)
   if hit then return hit end
-  local py_map = store.py_map
-  if py_map[chunk] and (mode == "quanpin" or #chunk == 2) then
-    local r = { chunk }
-    cache_put(seg_cache, key, r, 2048)
-    return r
-  end
-  if mode == "flypy" or mode == "zrm" then
-    -- 2 字母编码优先按双拼解释，避免 "mn" 被全拼切分成 m + n。
-    if #chunk == 2 then
-      local sp = decode_shuangpin_string(store, chunk, mode)
-      if sp and #sp > 0 then
-        cache_put(seg_cache, key, sp, 2048)
-        return sp
-      end
-    end
-    local segs = segment_pinyin_optimal(store, chunk)
-    if #segs > 0 then
-      local all_valid = true
-      for _, seg in ipairs(segs) do
-        if not store.valid_pinyins[seg] then all_valid = false; break end
-      end
-      if all_valid then
-        cache_put(seg_cache, key, segs, 2048)
-        return segs
-      end
-    end
-    local sp = decode_shuangpin_string(store, chunk, mode)
-    if sp and #sp > 0 then
-      cache_put(seg_cache, key, sp, 2048)
-      return sp
-    end
-    if #segs > 0 then
-      cache_put(seg_cache, key, segs, 2048)
-      return segs
-    end
-    local r = { chunk }
-    cache_put(seg_cache, key, r, 2048)
-    return r
-  end
-  local segs = segment_pinyin_optimal(store, chunk)
-  if #segs > 0 then
-    local has_single_frag = false
-    for _, seg in ipairs(segs) do
-      if #seg == 1 and not store.valid_pinyins[seg] then
-        has_single_frag = true
-        break
-      end
-    end
-    if (has_single_frag or #chunk <= 4) and #chunk >= 2 and #chunk % 2 == 0 then
-      local sp = decode_shuangpin_string(store, chunk, "flypy")
-      if sp then
-        local all_valid = #sp > 0
-        for _, seg in ipairs(sp) do
-          if not store.valid_pinyins[seg] then all_valid = false; break end
-        end
-        if all_valid then
-          cache_put(seg_cache, key, sp, 2048)
-          return sp
-        end
-      end
-      sp = decode_shuangpin_string(store, chunk, "zrm")
-      if sp then
-        local all_valid = #sp > 0
-        for _, seg in ipairs(sp) do
-          if not store.valid_pinyins[seg] then all_valid = false; break end
-        end
-        if all_valid then
-          cache_put(seg_cache, key, sp, 2048)
-          return sp
-        end
-      end
-    end
-    cache_put(seg_cache, key, segs, 2048)
-    return segs
-  end
-  local r = { chunk }
-  cache_put(seg_cache, key, r, 2048)
-  return r
+  local result = codec:segment(chunk)
+  cache_put(seg_cache, key, result, 2048)
+  return result
 end
 
 -- ---------------------------------------------------------------------------
@@ -1487,18 +1854,18 @@ local function get_direct_comp_rank(store, term)
   return rank
 end
 
-local function parse_query(store, raw_query, mode)
+local function parse_query(store, raw_query, codec)
   local lower = ascii_lower(raw_query)
   local items = {}
   if has_separator(lower) then
     for _, part in ipairs(split_separator(lower)) do
       if part ~= "" then
-        local segs = segment_alpha_string(store, part, mode)
+        local segs = segment_alpha_string(store, part, codec)
         for _, s in ipairs(segs) do items[#items + 1] = s end
       end
     end
   elseif is_ascii_alpha_only(lower) then
-    items = segment_alpha_string(store, lower, mode)
+    items = segment_alpha_string(store, lower, codec)
   else
     local cur = {}
     for _, ch in ipairs(utf8_chars(lower)) do
@@ -1506,7 +1873,7 @@ local function parse_query(store, raw_query, mode)
         cur[#cur + 1] = ch
       else
         if #cur > 0 then
-          local segs = segment_alpha_string(store, table.concat(cur), mode)
+          local segs = segment_alpha_string(store, table.concat(cur), codec)
           for _, s in ipairs(segs) do items[#items + 1] = s end
           cur = {}
         end
@@ -1514,7 +1881,7 @@ local function parse_query(store, raw_query, mode)
       end
     end
     if #cur > 0 then
-      local segs = segment_alpha_string(store, table.concat(cur), mode)
+      local segs = segment_alpha_string(store, table.concat(cur), codec)
       for _, s in ipairs(segs) do items[#items + 1] = s end
     end
   end
@@ -1936,15 +2303,15 @@ local function merge_exact_first(exact, broad)
   return merged, exact_set
 end
 
-local function search_components(store, query_str, max_results, mode,
+local function search_components(store, query_str, max_results, codec,
                                  disabled_blocks)
   if query_str == "" then return {} end
-  local cache_key = query_str .. ":" .. max_results .. ":" .. mode
+  local cache_key = query_str .. ":" .. max_results .. ":" .. codec.id
                       .. disabled_cache_key(disabled_blocks)
   local hit = cache_get(query_cache, cache_key)
   if hit then return hit end
 
-  local pq = parse_query(store, query_str, mode)
+  local pq = parse_query(store, query_str, codec)
   if #pq.order == 0 then return {} end
 
   local matchers = {}
@@ -2075,73 +2442,15 @@ end
 -- 混合检字：O 模式查询代数、分解、排序
 -- ---------------------------------------------------------------------------
 
-local SEARCH_ZERO_VOWELS = {
-  aa = "a", ai = "ai", an = "an", ah = "ang", ao = "ao", ee = "e",
-  ei = "ei", en = "en", eg = "eng", er = "er", oo = "o", ou = "ou",
-}
-local SEARCH_FLYPY_FINALS = {
-  q = { "iu" }, w = { "ei" }, r = { "uan" }, t = { "ue", "ve" },
-  y = { "un" }, p = { "ie" }, d = { "ai" }, f = { "en" }, g = { "eng" },
-  h = { "ang" }, j = { "an" }, k = { "uai", "ing" }, l = { "uang", "iang" },
-  z = { "ou" }, x = { "ua", "ia" }, c = { "ao" }, v = { "ui", "v" },
-  b = { "in" }, n = { "iao" }, m = { "ian" }, s = { "iong", "ong" },
-  o = { "uo", "o" }, u = { "u" }, i = { "i" }, a = { "a" }, e = { "e" },
-}
-local SEARCH_ZRM_FINALS = {
-  q = { "iu" }, w = { "ua", "ia" }, r = { "uan" }, t = { "ue", "ve" },
-  y = { "uai", "ing" }, p = { "un" }, d = { "uang", "iang" }, f = { "en" },
-  g = { "eng" }, h = { "ang" }, j = { "an" }, k = { "ao" }, l = { "ai" },
-  z = { "ou" }, x = { "ia" }, c = { "ch" }, v = { "ui", "v" }, b = { "in" },
-  n = { "in" }, m = { "ian" }, s = { "iong", "ong" }, o = { "uo", "o" },
-  u = { "u" }, i = { "i" }, a = { "a" }, e = { "e" },
-}
-
 local function strip_space(s)
   return (s:gsub("[ \t\r\n]", ""))
 end
 
-local function decode_shuangpin(store, raw, mode)
-  local sp = ascii_lower(raw)
-  if #sp ~= 2 or not is_ascii_alpha_only(sp) or mode == "quanpin" then
-    return sp
-  end
-  local z = SEARCH_ZERO_VOWELS[sp]
-  if z and (store.valid_pinyins[z] or store.py_map[z]) then return z end
-  local function init_of(c)
-    if c == "v" then return "zh" end
-    if c == "i" then return "ch" end
-    if c == "u" then return "sh" end
-    return c
-  end
-  local finals = mode == "zrm" and SEARCH_ZRM_FINALS or SEARCH_FLYPY_FINALS
-  local fit = finals[sp:sub(2, 2)]
-  if not fit then return sp end
-  local init = init_of(sp:sub(1, 1))
-  for _, fin in ipairs(fit) do
-    local py = init .. fin
-    if (init == "j" or init == "q" or init == "x" or init == "y") and fin == "ve" then
-      py = init .. "ue"
-    elseif (init == "j" or init == "q" or init == "x" or init == "y") and fin == "v" then
-      py = init .. "u"
-    end
-    if store.valid_pinyins[py] or store.py_map[py] then return py end
-  end
-  return sp
-end
-
-local function normalize_component(store, raw, mode)
+local function normalize_component(store, raw, codec)
   local s = strip_space(raw)
   if s == "" then return s end
-  local lower = ascii_lower(s)
-  local known = store:find_key(s) ~= nil or store:find_key(lower) ~= nil
-             or store.py_map[s] ~= nil or store.py_map[lower] ~= nil
-             or store:resolve_term(s) ~= nil
-  if not known and #lower == 2 and is_ascii_alpha_only(lower) then
-    local decoded = decode_shuangpin(store, lower, mode)
-    if decoded ~= lower and (store.valid_pinyins[decoded] or store.py_map[decoded]) then
-      return canon(decoded)
-    end
-  end
+  local decoded = codec:decode_exact(s)
+  if #decoded > 0 then return canon(decoded[1]) end
   return canon(s)
 end
 
@@ -2592,10 +2901,10 @@ local function rank_hybrid(store, cands, normalized, exact_ids, score_limit)
   return out
 end
 
-local function normalize_algebra_item(store, raw, mode)
+local function normalize_algebra_item(store, raw, codec)
   local s = strip_space(raw)
   if #utf8_chars(s) == 1 then return s end
-  return normalize_component(store, s, mode)
+  return normalize_component(store, s, codec)
 end
 
 local function parse_algebra_steps(components)
@@ -2806,8 +3115,8 @@ local function format_group_component(op, components, excludes)
   return out
 end
 
-local function apply_eval_item(store, st, op, raw, mode)
-  local item = normalize_algebra_item(store, raw, mode)
+local function apply_eval_item(store, st, op, raw, codec)
+  local item = normalize_algebra_item(store, raw, codec)
   if item == "" then return end
   if op == "+" then
     st.components[#st.components + 1] = item
@@ -2841,7 +3150,7 @@ local function is_eval_separator(c)
          or c == "." or c == "_"
 end
 
-local function eval_algebra_seq(store, s, i, mode, stop)
+local function eval_algebra_seq(store, s, i, codec, stop)
   local st = { components = {}, excludes = {}, has_sub = false }
   local op = "+"
   while i <= #s do
@@ -2850,7 +3159,7 @@ local function eval_algebra_seq(store, s, i, mode, stop)
       if stop then i = i + 1 end
       break
     elseif c == "(" then
-      local new_i, inner = eval_algebra_seq(store, s, i + 1, mode, true)
+      local new_i, inner = eval_algebra_seq(store, s, i + 1, codec, true)
       merge_eval_group(store, st, op, inner)
       if op == "!" then op = "+" end
       i = new_i
@@ -2872,11 +3181,11 @@ local function eval_algebra_seq(store, s, i, mode, stop)
       local item = s:sub(start, i - 1)
       if item ~= "" then
         if is_ascii_alpha_only(item) then
-          apply_eval_item(store, st, op, item, mode)
+          apply_eval_item(store, st, op, item, codec)
           if op == "!" then op = "+" end
         else
           for _, ch in ipairs(utf8_chars(item)) do
-            apply_eval_item(store, st, op, ch, mode)
+            apply_eval_item(store, st, op, ch, codec)
             if op == "!" then op = "+" end
           end
         end
@@ -2886,20 +3195,20 @@ local function eval_algebra_seq(store, s, i, mode, stop)
   return i, st
 end
 
-local function evaluate_algebra_expression(store, expression, mode)
-  local _, st = eval_algebra_seq(store, expression, 1, mode, false)
+local function evaluate_algebra_expression(store, expression, codec)
+  local _, st = eval_algebra_seq(store, expression, 1, codec, false)
   return st.components, st.excludes
 end
 
 -- 逆波兰后缀求值。非运算符层先按中缀表达式解析为一个操作数，因此括号结果、
 -- 多字组合部件等都能直接入栈。返回 components, excludes, pure_sub, has_sub；
 -- 运算符栈不足时返回 nil。
-function M._rpn.evaluate(store, components, mode)
+function M._rpn.evaluate(store, components, codec)
   local stack = {}
   local excludes = {}
 
   local function push_operand(text)
-    local comps, ex = evaluate_algebra_expression(store, text, mode)
+    local comps, ex = evaluate_algebra_expression(store, text, codec)
     stack[#stack + 1] = {
       components = comps,
       excludes = ex,
@@ -3081,11 +3390,11 @@ local function lookup_exact_structure(store, normalized, disabled_blocks)
   return ids
 end
 
-local function search_by_leaves(store, leaves, mode, max_results,
+local function search_by_leaves(store, leaves, codec, max_results,
                                 disabled_blocks, exclude_entries)
   local normalized = {}
   for _, raw in ipairs(leaves) do
-    local n = normalize_component(store, raw, mode)
+    local n = normalize_component(store, raw, codec)
     if n ~= "" then normalized[#normalized + 1] = n end
   end
   if #normalized == 0 then return {} end
@@ -3155,11 +3464,11 @@ local function search_by_leaves(store, leaves, mode, max_results,
   return cands
 end
 
-local function search_hybrid(store, components, mode, max_results,
+local function search_hybrid(store, components, codec, max_results,
                              disabled_blocks, notation)
   if #components == 0 then return {} end
   local rpn = notation == "rpn"
-  local cache_key = table.concat(components, "\1") .. ":" .. mode .. ":"
+  local cache_key = table.concat(components, "\1") .. ":" .. codec.id .. ":"
                     .. max_results .. disabled_cache_key(disabled_blocks)
                     .. (rpn and ":rpn" or ":infix")
   local hit = cache_get(hybrid_cache, cache_key)
@@ -3169,7 +3478,7 @@ local function search_hybrid(store, components, mode, max_results,
   local has_sub = false
   if rpn then
     local comps, ex, rpn_pure_sub, rpn_has_sub =
-        M._rpn.evaluate(store, components, mode)
+        M._rpn.evaluate(store, components, codec)
     if not comps then
       local empty = {}
       cache_put(hybrid_cache, cache_key, empty, 256)
@@ -3180,7 +3489,7 @@ local function search_hybrid(store, components, mode, max_results,
   else
     local steps = parse_algebra_steps(components)
     for _, step in ipairs(steps) do
-      local item = normalize_algebra_item(store, step.item, mode)
+      local item = normalize_algebra_item(store, step.item, codec)
       if item ~= "" then
         if step.op == "+" then
           if #current > 0 and has_sub then pure_sub = false end
@@ -3200,7 +3509,7 @@ local function search_hybrid(store, components, mode, max_results,
   if pure_sub and has_sub and #current > 0 then
     local results = pure_subtraction_results(store, current)
     results = remove_excluded(store, exclude_entries, results)
-    local expanded = search_by_leaves(store, current, mode, max_results,
+    local expanded = search_by_leaves(store, current, codec, max_results,
                                       disabled_blocks, exclude_entries)
     local seen, merged = {}, {}
     for _, id in ipairs(results) do
@@ -3219,14 +3528,53 @@ local function search_hybrid(store, components, mode, max_results,
     cache_put(hybrid_cache, cache_key, empty, 256)
     return empty
   end
-  local results = search_by_leaves(store, current, mode, max_results,
+  local results = search_by_leaves(store, current, codec, max_results,
                                    disabled_blocks, exclude_entries)
   cache_put(hybrid_cache, cache_key, results, 256)
   return results
 end
 
-local function get_component_candidates(store, raw_code, mode, limit)
-  local code = strip_space(raw_code)
+local function get_pinyin_candidates(store, pinyin, limit)
+  local pcm = store.py_char_map
+  if pcm and next(pcm) then
+    local list = pcm[pinyin]
+    if not list then return {} end
+    local ids = {}
+    local n = #list
+    if limit and limit > 0 and n > limit then n = limit end
+    for i = 1, n do ids[i] = list[i] end
+    return ids
+  end
+
+  -- 兼容旧数据（理论上 v3 不允许缺少 PY_CHAR）。
+  local list = store.py_map[pinyin]
+  if not list then return {} end
+  local ids, seen = {}, {}
+  for _, t in ipairs(list) do
+    local cp = store:token_cp_of(t)
+    if cp ~= 0 then
+      local id = store:id_of_cp(cp)
+      if id ~= INVALID_ID and not seen[id] then
+        seen[id] = true
+        ids[#ids + 1] = id
+      end
+    end
+  end
+  table.sort(ids, function(a, b)
+    local fa, fb = store:hot(a).freq, store:hot(b).freq
+    if fa ~= fb then return fa > fb end
+    return a < b
+  end)
+  if limit and limit > 0 and #ids > limit then
+    local r = {}
+    for i = 1, limit do r[i] = ids[i] end
+    ids = r
+  end
+  return ids
+end
+
+local function get_component_candidates(store, raw_code, codec, limit)
+  local code = strip_space(raw_code):gsub("['/._]", "")
   while code ~= "" and (code:sub(1, 1) == "-" or code:sub(1, 1) == "+"
                         or code:sub(1, 1) == "!") do
     code = code:sub(2)
@@ -3235,74 +3583,49 @@ local function get_component_candidates(store, raw_code, mode, limit)
   code = ascii_lower(code)
   if not is_ascii_alpha_only(code) then return {} end
 
+  -- 完整编码优先；否则按编码前缀展开（增量输入）。
+  local lookups = codec:decode_exact(code)
+  local exact = #lookups > 0
+  if not exact then lookups = codec:decode_prefix(code) end
+  if #lookups == 0 then return {} end
+  local unbounded = exact and #lookups == 1
+
   local pcm = store.py_char_map
-  local lookup = code
-  if not ((pcm and pcm[lookup]) or store.py_map[lookup]) and #lookup == 2 then
-    local decoded = decode_shuangpin(store, lookup, mode)
-    if decoded ~= lookup then lookup = decoded end
+  local ids, seen = {}, {}
+  local function add_id(id)
+    if id ~= INVALID_ID and not seen[id] then
+      seen[id] = true
+      ids[#ids + 1] = id
+    end
   end
 
-  -- v3 数据：完整字符拼音索引优先。精确单音节不设上限。
   if pcm and next(pcm) then
-    local exact = pcm[lookup]
-    if exact then
-      local ids = {}
-      for i = 1, #exact do ids[i] = exact[i] end
-      return ids
+    for _, lookup in ipairs(lookups) do
+      local list = pcm[lookup]
+      if list then
+        for _, id in ipairs(list) do add_id(id) end
+      end
     end
-    local ids, seen = {}, {}
-    for py, list in pairs(pcm) do
-      if starts_with(py, lookup) then
-        for _, id in ipairs(list) do
-          if not seen[id] then
-            seen[id] = true
-            ids[#ids + 1] = id
-          end
+  else
+    -- 兼容旧数据（理论上 v3 不允许缺少 PY_CHAR）。
+    for _, lookup in ipairs(lookups) do
+      local list = store.py_map[lookup]
+      if list then
+        for _, t in ipairs(list) do
+          local cp = store:token_cp_of(t)
+          if cp ~= 0 then add_id(store:id_of_cp(cp)) end
         end
       end
     end
-    table.sort(ids, function(a, b)
-      local fa, fb = store:hot(a).freq, store:hot(b).freq
-      if fa ~= fb then return fa > fb end
-      return a < b
-    end)
-    if limit and limit > 0 and #ids > limit then
-      local r = {}
-      for i = 1, limit do r[i] = ids[i] end
-      ids = r
-    end
-    return ids
   end
 
-  -- 兼容旧数据（理论上 v3 不允许缺少 PY_CHAR）。
-  local tokens
-  local pit = store.py_map[lookup]
-  if pit then
-    tokens = pit
-  else
-    tokens = {}
-    local seen = {}
-    for py, list in pairs(store.py_map) do
-      if starts_with(py, lookup) then
-        for _, t in ipairs(list) do
-          if not seen[t] then seen[t] = true; tokens[#tokens + 1] = t end
-        end
-      end
-    end
-  end
-  local ids, seen_ids = {}, {}
-  for _, t in ipairs(tokens) do
-    local cp = store:token_cp_of(t)
-    if cp ~= 0 then
-      local id = store:id_of_cp(cp)
-      if id ~= INVALID_ID and not seen_ids[id] then
-        seen_ids[id] = true
-        ids[#ids + 1] = id
-      end
-    end
-  end
-  table.sort(ids, function(a, b) return store:hot(a).freq > store:hot(b).freq end)
-  if limit and limit > 0 and #ids > limit then
+  if #ids == 0 then return {} end
+  table.sort(ids, function(a, b)
+    local fa, fb = store:hot(a).freq, store:hot(b).freq
+    if fa ~= fb then return fa > fb end
+    return a < b
+  end)
+  if not unbounded and limit and limit > 0 and #ids > limit then
     local r = {}
     for i = 1, limit do r[i] = ids[i] end
     ids = r
@@ -3354,7 +3677,7 @@ local function default_config()
     hybrid = { prefix = "O", tag = "ids_reverse_hybrid", tips = "〔汉字部件检字〕" },
     data_path = "ids_data.bin",
     custom_path = "",
-    shuangpin_scheme = "flypy",
+    algebra = {},
     algebra_notation = "infix",
     ids_format = "unicode",
     variant_trigger = "/",
@@ -3382,6 +3705,23 @@ local function config_name_space(env)
   return ns
 end
 
+local function config_list_size(list)
+  if type(list.size) == "function" then return list:size() end
+  return list.size or 0
+end
+
+local function get_algebra(conf, ns)
+  local out = {}
+  local list = conf:get_list(ns .. "/algebra")
+  if not list then return out end
+  for i = 0, config_list_size(list) - 1 do
+    local value = list:get_value_at(i)
+    local rule = value and value:get_string()
+    if rule and rule ~= "" then out[#out + 1] = rule end
+  end
+  return out
+end
+
 local function load_config(env)
   local cfg = default_config()
   local ns = config_name_space(env)
@@ -3402,7 +3742,7 @@ local function load_config(env)
   cfg.hybrid.tips = get_s("hybrid_tips", cfg.hybrid.tips)
   cfg.data_path = get_s("data_file", cfg.data_path)
   cfg.custom_path = get_s("custom_file", cfg.custom_path)
-  cfg.shuangpin_scheme = get_s("shuangpin_scheme", cfg.shuangpin_scheme)
+  cfg.algebra = get_algebra(conf, ns)
   cfg.algebra_notation = get_s("algebra_notation", cfg.algebra_notation)
   cfg.ids_format = get_s("ids_format", cfg.ids_format)
   cfg.variant_trigger = get_s("variant_trigger", cfg.variant_trigger)
@@ -3420,9 +3760,6 @@ local function load_config(env)
   v = conf:get_bool(ns .. "/show_block")
   if v ~= nil then cfg.show_block = v end
 
-  if cfg.shuangpin_scheme ~= "zrm" and cfg.shuangpin_scheme ~= "quanpin" then
-    cfg.shuangpin_scheme = "flypy"
-  end
   if cfg.algebra_notation ~= "rpn" then cfg.algebra_notation = "infix" end
   if cfg.variant_trigger == "" then cfg.variant_trigger = "/" end
   if cfg.variant_replace_key == "" then cfg.variant_replace_key = "Shift+V" end
@@ -3509,20 +3846,6 @@ local function save_hybrid_state(ctx, components, codes)
   ctx:set_property(HYBRID_STATE_PROPERTY, table.concat(out))
 end
 
-local function pinyin_mode(config, ctx)
-  local mode = config.shuangpin_scheme
-  if ctx then
-    if ctx:get_option("shuangpin_flypy") or ctx:get_option("double_pinyin") then
-      mode = "flypy"
-    elseif ctx:get_option("shuangpin_zrm") then
-      mode = "zrm"
-    elseif ctx:get_option("pinyin_quanpin") then
-      mode = "quanpin"
-    end
-  end
-  return mode
-end
-
 local function has_variants(text)
   if not store_instance then return true end
   local pos = 0
@@ -3577,7 +3900,7 @@ local function try_commit_closed_group(ctx, env)
   local store = ensure_store(env.config)
   if not store then return false end
   local components, excludes = evaluate_algebra_expression(
-      store, group.inner, pinyin_mode(env.config, ctx))
+      store, group.inner, get_codec(store, env.config))
   local base = ctx.input:sub(1, #ctx.input - #st.pending)
   if env.config.algebra_notation == "rpn" then
     -- 后缀模式：括号结果先作为操作数入栈，外层 +/-/! 改写为后缀运算符。
@@ -4274,9 +4597,9 @@ local function query_search(input, segment, env)
   end
   local store = ensure_store(env.config)
   if not store then return end
-  local mode = pinyin_mode(env.config, env.engine.context)
+  local codec = get_codec(store, env.config)
   local results = search_components(store, query_raw, env.config.max_results,
-                                    mode, env.config.disabled_blocks_enabled
+                                    codec, env.config.disabled_blocks_enabled
                                           and env.config.disabled_blocks or nil)
   if #results == 0 then return end
   build_search_candidates(store, results, prefix == "" and "" or input,
@@ -4336,9 +4659,22 @@ local function build_multi_component_candidates(store, tokens, segment, config,
       if id == INVALID_ID then return end
       if disabled and disabled[store:hot(id).block] then return end
       opts[1] = { text = token, rank = 0, freq = store:hot(id).freq }
+    elseif store.valid_pinyins[token] then
+      -- Segment 解码出的标准拼音（不再当作输入码处理）。
+      local ids = get_pinyin_candidates(store, token, 80)
+      for _, id in ipairs(ids) do
+        if not (disabled and disabled[store:hot(id).block]) then
+          local cp = store:cp_of_id(id)
+          if cp ~= 0 then
+            opts[#opts + 1] = { text = cp_to_utf8(cp), rank = #opts,
+                                freq = store:hot(id).freq }
+            if #opts >= per_token_limit then break end
+          end
+        end
+      end
     else
       local ids = get_component_candidates(store, token,
-                                           pinyin_mode(config, ctx), 80)
+                                           get_codec(store, config), 80)
       for _, id in ipairs(ids) do
         if not (disabled and disabled[store:hot(id).block]) then
           local cp = store:cp_of_id(id)
@@ -4427,7 +4763,7 @@ local function build_variant_candidates(store, base_id, base, preedit, segment,
   end
 end
 
-local function parse_pending_components(store, pending, mode)
+local function parse_pending_components(store, pending, codec)
   local out = { valid = false, tokens = {} }
   if pending == "" then return out end
   local i = 1
@@ -4444,7 +4780,7 @@ local function parse_pending_components(store, pending, mode)
     if #ascii == 0 then return true end
     local s = table.concat(ascii)
     ascii = {}
-    local segs = segment_alpha_string(store, s, mode)
+    local segs = segment_alpha_string(store, s, codec)
     for _, seg in ipairs(segs) do
       if seg ~= "" then out.tokens[#out.tokens + 1] = seg end
     end
@@ -4548,12 +4884,12 @@ local function query_hybrid(segment, env)
     local run_start, run_end = find_last_ascii_run(pending)
     if run_start then
       local run = pending:sub(run_start, run_end)
-      local mode = pinyin_mode(env.config, ctx)
-      local tokens = segment_alpha_string(store, run, mode)
+      local codec = get_codec(store, env.config)
+      local tokens = segment_alpha_string(store, run, codec)
       if #tokens >= 2 then
         build_multi_component_candidates(store, tokens, segment, env.config, ctx)
       elseif #tokens == 1 then
-        local results = get_component_candidates(store, tokens[1], mode, 80)
+        local results = get_component_candidates(store, run, codec, 80)
         build_component_candidates(store, results, segment, env.config)
       end
     end
@@ -4577,7 +4913,7 @@ local function query_hybrid(segment, env)
     for _, comp in ipairs(st.components) do comp_list[#comp_list + 1] = comp end
     if pending ~= "" then comp_list[#comp_list + 1] = pending end
     local results = search_hybrid(store, comp_list,
-                                  pinyin_mode(env.config, ctx),
+                                  get_codec(store, env.config),
                                   env.config.max_results,
                                   env.config.disabled_blocks_enabled
                                     and env.config.disabled_blocks or nil,
@@ -4585,7 +4921,7 @@ local function query_hybrid(segment, env)
     build_result_candidates(store, results, segment, pending, env.config, ctx)
   elseif pending ~= "" and not is_operator_only and has_component then
     local parsed = parse_pending_components(store, pending,
-                                            pinyin_mode(env.config, ctx))
+                                            get_codec(store, env.config))
     if parsed.valid and #parsed.tokens >= 2 then
       build_multi_component_candidates(store, parsed.tokens, segment,
                                        env.config, ctx)
@@ -4596,8 +4932,8 @@ local function query_hybrid(segment, env)
         cand.quality = 100.0
         yield(cand)
       else
-        local results = get_component_candidates(store, parsed.tokens[1],
-                                                 pinyin_mode(env.config, ctx), 80)
+        local results = get_component_candidates(store, pending,
+                                                 get_codec(store, env.config), 80)
         build_component_candidates(store, results, segment, env.config)
       end
     elseif is_component_expression(pending) then
@@ -4607,7 +4943,7 @@ local function query_hybrid(segment, env)
       yield(cand)
     else
       local results = get_component_candidates(store, pending,
-                                               pinyin_mode(env.config, ctx), 80)
+                                               get_codec(store, env.config), 80)
       build_component_candidates(store, results, segment, env.config)
     end
   end
@@ -4703,6 +5039,7 @@ M._internal = {
   search_components = search_components,
   search_hybrid = search_hybrid,
   get_component_candidates = get_component_candidates,
+  get_pinyin_candidates = get_pinyin_candidates,
   build_comment = build_comment,
   ids_of_text = ids_of_text,
   format_ids = format_ids,
@@ -4710,7 +5047,8 @@ M._internal = {
   utf8_chars = utf8_chars,
   utf8_length = utf8_length,
   segment_alpha_string = segment_alpha_string,
-  decode_shuangpin = decode_shuangpin,
+  build_codec = build_codec,
+  get_codec = get_codec,
   normalize_component = normalize_component,
   parse_pending_components = parse_pending_components,
   parse_algebra_steps = parse_algebra_steps,
@@ -4725,6 +5063,7 @@ M._internal = {
   build_multi_component_candidates = build_multi_component_candidates,
   build_variant_candidates = build_variant_candidates,
   clear_query_caches = clear_query_caches,
+  load_config = load_config,
   leaf_struct_hash = leaf_struct_hash,
 }
 

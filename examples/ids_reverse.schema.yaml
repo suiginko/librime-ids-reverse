@@ -54,7 +54,13 @@ ids_reverse:
   data_file: build/ids_data.bin
   custom_file: ids_custom.txt
   max_results: 60
-  shuangpin_scheme: flypy
+  # 输入编码：Rime 拼写代数规则；留空 = 全拼。
+  # algebra:
+  #   - xform/^zh/v/
+  #   - xform/^ch/i/
+  #   - xform/^sh/u/
+  #   - xform/iu$/q/
+  #   - xform/(.)ei$/$1w/
   algebra_notation: infix   # infix（默认）| rpn
   show_pinyin: true
   show_ids: true

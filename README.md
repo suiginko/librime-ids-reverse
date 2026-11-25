@@ -8,7 +8,8 @@ librime 插件：**部件检字（IDS 模糊搜字）翻译器**，C++ 原生实
 包含两套模式：
 
 - **I 模式**：`I` + 部件/拼音，例如 `I木口`、`Ikouhao`，由原生 processor/segmentor 触发。
-- **O 模式**：`O` + 汉字、全拼、双拼混合检字，支持 `-` 减法、`+` 加法、回车字母直出、IDS 结构上屏；可通过 `algebra_notation: rpn` 使用逆波兰后缀表达式。
+- **O 模式**：`O` + 汉字、全拼/自定义编码混合检字，支持 `-` 减法、`+` 加法、回车字母直出、IDS 结构上屏；可通过 `algebra_notation: rpn` 使用逆波兰后缀表达式。
+- **输入编码**：使用 `ids_reverse/algebra` 中的 Rime 拼写代数（spelling algebra）规则；留空即全拼，填入规则即可支持双拼、简拼、模糊音等。
 
 C++ 版 O 模式为**插件自包含实现**，不需要 Lua，也不依赖任何外部输入法方案；
 Lua 5.5 版见下文「Lua 5.5 版本」。
@@ -141,6 +142,10 @@ engine:
 - Lua 的 `select_notifier` 没有 `at_front`，因此 O 模式会临时关闭
   `_auto_commit`，由 Lua 组件自己处理结果上屏和部件状态。
 - 两个版本共用 `ids_reverse` 配置与 property 名称，但不要同时挂载两套组件。
+- 输入编码：C++ 版直接使用 librime 的 `Projection`；Lua 版内置了一小套
+  Boost 正则子集，支持 `xlit` / `xform` / `erase` / `derive` / `fuzz` /
+  `abbrev` / `reorder` 及常见语法（`^ $ . [] () | * + ? {n,m}`、`$1`）。
+  遇到不支持的规则会跳过并打印一次警告。
 
 ### 测试
 
@@ -148,7 +153,7 @@ engine:
 lua5.5 plugins/ids-reverse/tests/test_ids_reverse.lua
 ```
 
-测试会覆盖数据加载、全拼/双拼、I 模式、O 模式加减排除、异体字和多部件组合。
+测试会覆盖数据加载、全拼/拼写代数、I 模式、O 模式加减排除、异体字和多部件组合。
 如果 `ids_data.bin` 不在默认位置，可作为参数传入：
 
 ```sh
@@ -174,7 +179,9 @@ lua5.5 plugins/ids-reverse/tests/bench_ids_reverse.lua
 | O 排除 `木木!口` | ~1.7–3.1 ms | ~0.001 ms |
 | 部件候选 `mu` | ~0.03–0.06 ms | ~0.03–0.06 ms |
 
-首次加载数据约 25–45 ms。I 模式双部件交叉检索是当前最慢的冷查询路径。
+首次加载数据约 25–45 ms。首次构建拼写代数映射时，Lua 版约 100–200 ms
+（取决于规则数量），C++ 版通常低于 5 ms；之后走 codec 与查询缓存。
+I 模式双部件交叉检索是当前最慢的冷查询路径。
 
 同机 C++ 版冷查询大致为：I 双部件约 1 ms、O 单部件约 0.02 ms。Lua 版
 冷查询约为 C++ 的 10–50 倍，但 O 模式通常在 3 ms 内，结果缓存命中后低于
@@ -210,7 +217,12 @@ ids_reverse:
   data_file: build/ids_data.bin
   custom_file: ids_custom.txt
   max_results: 60
-  shuangpin_scheme: flypy        # flypy | zrm | quanpin
+  # 输入编码：Rime 拼写代数规则。留空或省略 = 全拼。
+  # algebra:
+  #   - xform/^zh/v/
+  #   - xform/^ch/i/
+  #   - xform/^sh/u/
+  #   # ...
   algebra_notation: infix        # infix（默认）| rpn
   show_pinyin: true
   show_ids: true
@@ -234,6 +246,37 @@ ids_reverse:
 
 ---
 
+## 输入编码与拼写代数
+
+输入编码统一由 `ids_reverse/algebra` 控制，语法与 Rime 的 `speller/algebra` 相同：
+
+```yaml
+ids_reverse:
+  # 留空 = 全拼。
+  algebra:
+    - xform/^zh/v/
+    - xform/^ch/i/
+    - xform/^sh/u/
+    - xform/iu$/q/
+    - xform/(.)ei$/$1w/
+    # ...
+```
+
+规则方向与 Rime 一致：**标准拼音 → 输入码**。插件会把规则应用到
+`ids_data.bin` 的无调全拼音节表上，得到「输入码 → 标准拼音」映射，再进行
+切分和查询。因此：
+
+- 不配置 `algebra` 时，输入码就是全拼，`Ikouhao`、`Omukou` 等可直接使用。
+- 配置双拼规则后，严格按规则解码；规则没有保留的全拼不再自动接受。
+  例如 flypy 规则下输入 `Okz` 得到 `kou`，但 `Okou` 不会被当成 `kou`。
+- 简拼、模糊音等通过 `abbrev` / `fuzz` / `derive` 规则启用。
+- `ids_custom.txt` 中新增的拼音请写成无调形式（如 `木 mu`）。
+
+> 该 `algebra` 与 O 模式的 `algebra_notation` 无关：前者控制输入编码，
+> 后者只控制 `+ - !` 是中缀还是后缀表示法。
+
+---
+
 ## I 模式（search）
 
 - `I` + 部件/拼音，例如 `I木口`、`Ikouhao`。
@@ -254,9 +297,9 @@ ids_reverse:
 
 ## O 模式（hybrid）
 
-- `O` + 拼音/双拼：例如 `Omu`、`Omukou`、`Okz`。选中部件后，拼音编码会被
+- `O` + 拼音/输入码：例如全拼下的 `Omu`、`Omukou`，或配置双拼 algebra 后的 `Okz`。选中部件后，输入编码会被
   替换为所选汉字并保留在组字区，例如 `Oshao` → 选 `少` → `O少`。
-- O 模式不接受直接输入汉字；组字区中的汉字只来自拼音/双拼候选选择（或异体字替换）。
+- O 模式不接受直接输入汉字；组字区中的汉字只来自拼音/输入码候选选择（或异体字替换）。
 - 多部件连写：`Omukou`、`Omu'kou` 会按音节生成 `木口`、`目口`、`木扣` 等
   组合部件候选；选中一次即可加入多个部件，例如 `Omukou` → 选 `木口` →
   结果含 `杏`、`呆` 等，`Omumu` → 选 `木木` → 结果 `林`。单音节编码
@@ -354,7 +397,7 @@ RPN 示例：
 RPN 下 `!` 是后缀运算符，标准写法是 `O木木口!`，不是 `O木木!口`。
 
 O 模式自带的部件候选来自 `ids_data.bin` 的 `PY_CHAR`，因此即使当前方案没有拼音词典，
-也可以完成 `O` + 拼音/双拼选部件。候选包含该读音的全部字符（包括 `pypinyin` 异读），
+也可以完成 `O` + 拼音/输入码选部件。候选包含该读音的全部字符（包括 `pypinyin` 异读），
 完整单音节不设数量上限；仅前缀/未完成拼音保留上限。
 
 ---
@@ -375,7 +418,11 @@ patch:
     data_file: build/ids_data.bin
     custom_file: ids_custom.txt
     max_results: 60
-    shuangpin_scheme: flypy
+    # 留空 = 全拼；需要双拼/简拼/模糊音时填写 Rime 拼写代数规则。
+    # algebra:
+    #   - xform/^zh/v/
+    #   - xform/^ch/i/
+    #   - xform/^sh/u/
     algebra_notation: infix
     show_pinyin: true
     show_ids: true
@@ -452,6 +499,9 @@ cmake --build build --target rime-ids-reverse
 
 ## 验证
 
+以下示例假定 `ids_reverse/algebra` 留空（全拼）。若配置了双拼等规则，请按
+规则对应的编码验证，例如 flypy 下 `Okz` 对应全拼的 `Okou`。
+
 I 模式：
 
 - `I木口`
@@ -497,6 +547,23 @@ O 模式：
 - `O艹癸` → 选 `艹癸` → 结果 `葵` → `/` → 选 `𦷡` → `Shift+V` → preedit `O艹癸𦷡`
 - `Omu` + 回车 → 以 `mu` 作为部件继续检字
 - `Ctrl+Enter` → 上屏当前候选 IDS
+
+拼写代数：
+
+```yaml
+ids_reverse:
+  algebra:
+    - xform/^zh/v/
+    - xform/^ch/i/
+    - xform/^sh/u/
+    - xform/(.)ou$/$1z/
+    - xform/(.)iao$/$1n/
+```
+
+- `Okz` → `kou` 的部件候选
+- `Omn` → `miao` 的部件候选
+- `Omukz` → 组合候选 `木口`
+- 未配置 `algebra` 时 `Okou`、`Omukou` 正常按全拼切分
 
 RPN 模式（`algebra_notation: rpn`）：
 

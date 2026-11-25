@@ -19,6 +19,7 @@
 
 #include "ids_reverse_config.h"
 #include "ids_reverse_group.h"
+#include "ids_reverse_input.h"
 #include "ids_reverse_search.h"
 #include "ids_store.h"
 #include "ids_text.h"
@@ -50,21 +51,6 @@ bool HasVariants(const std::string& text) {
   uint16_t n = 0;
   store.Variants(id, &variants, &n);
   return n > 0;
-}
-
-std::string CurrentPinyinMode(Context* ctx, const ReverseConfig& config) {
-  std::string mode = config.shuangpin_scheme;
-  if (ctx) {
-    if (ctx->get_option("shuangpin_flypy") ||
-        ctx->get_option("double_pinyin")) {
-      mode = "flypy";
-    } else if (ctx->get_option("shuangpin_zrm")) {
-      mode = "zrm";
-    } else if (ctx->get_option("pinyin_quanpin")) {
-      mode = "quanpin";
-    }
-  }
-  return mode;
 }
 
 // 逆波兰后缀模式下，按当前已保存的部件层计算表达式栈深度。
@@ -130,7 +116,7 @@ bool TryCommitClosedGroup(Context* ctx, const ReverseConfig& config) {
   IdsStore& store = IdsStore::Instance();
   AlgebraEvaluation eval;
   if (!EvaluateAlgebraExpression(store, group.inner,
-                                 CurrentPinyinMode(ctx, config), &eval))
+                                 *InputCodec::Get(store, config), &eval))
     return false;
   const std::string& input = ctx->input();
   std::string base = input.substr(0, input.size() - st.pending.size());

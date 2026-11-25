@@ -21,7 +21,8 @@ Chinese; preserve that.
 | `src/ids_store.{h,cc}` | IDS4 data layer: mmap, dense ids, section parsing, tokens, postings, canon/block tables. |
 | `src/ids_text.{h,cc}` | UTF-8/IDS helpers, `FormatIds`, block names, candidate comments. |
 | `src/ids_reverse_composer.{h,cc}` | `IdsReverseProcessor`, `IdsReverseSegmentor`, `IdsReverseFilter`; all key handling. |
-| `src/ids_reverse_translator.{h,cc}` | Translator, I-mode search, O-mode candidate construction, pinyin/shuangpin decoding. |
+| `src/ids_reverse_input.{h,cc}` | `InputCodec`: apply `ids_reverse/algebra` to the toneless pinyin syllabary, segment input codes, exact/prefix lookup. |
+| `src/ids_reverse_translator.{h,cc}` | Translator, I-mode search, O-mode candidate construction. |
 | `src/ids_reverse_search.{h,cc}` | O-mode `SearchHybrid` (add/subtract/exclude algebra) and component candidates. |
 | `src/ids_reverse_group.{h,cc}` | O-mode single-group pending parser and group-component formatting helpers. |
 | `ids_reverse.lua` | Whole Lua implementation; exports `processor`/`segmentor`/`translator`/`filter` and `_internal` for tests. |
@@ -136,6 +137,9 @@ by the ticket namespace). Shared settings live at the top level; only
   `hybrid_tips`.
 - O mode algebra notation: `algebra_notation` = `infix` (default) or `rpn`
   (postfix: operands first, then `+`/`-`/`!`).
+- Input encoding: `algebra` is a list of Rime spelling-algebra rules. Empty
+  means identity/full pinyin. Rules are applied to the toneless syllable set to
+  produce `code -> pinyin`, exactly like `DictCompiler::BuildPrism`.
 
 If both prefixes are equal, search mode wins. Config defaults and normalization
 live in `ReverseConfig` and `LoadReverseConfig`; mirror them in the Lua
@@ -143,6 +147,24 @@ live in `ReverseConfig` and `LoadReverseConfig`; mirror them in the Lua
 
 Load the store lazily through `EnsureIdsStoreLoaded` / `EnsureLoaded`; never
 load ~30 MB of data in a component constructor.
+
+### Input encoding (`InputCodec`)
+
+`IdsStore::valid_pinyins()` (PY keys) is the syllabary. `rime::Script` is built
+from it, then `rime::Projection` applies `ids_reverse/algebra`. The resulting
+`Script` is inverted into `code -> [{pinyin, SpellingType, credibility}]`.
+
+- `Segment` first checks that the whole input is a prefix of some code
+  sequence (strict algebra); otherwise it returns empty. It then performs a DP
+  over the code map: normal spellings beat fuzzy/abbrev, longer matches win
+  ties, and a trailing partial code stays a raw fragment for prefix candidate
+  lookup.
+- `DecodeExact` returns all pinyin for a complete code; `DecodePrefix` returns
+  pinyin for codes with a given prefix (incremental input).
+- An ambiguous code (multiple distinct pinyin, e.g. an abbreviation) stays a
+  raw token so downstream prefix matching can expand it.
+- The Lua implementation mirrors this with a bundled Boost.Regex subset
+  (`xlit`, `xform`, `erase`, `derive`, `fuzz`, `abbrev`, `reorder`).
 
 ### I mode (search)
 
@@ -154,7 +176,7 @@ load ~30 MB of data in a component constructor.
 4. `IdsReverseFilter` suppresses other translators when the input is exactly the
    bare prefix.
 
-`SearchComponents` handles components, full pinyin, and shuangpin; stems are
+`SearchComponents` handles components and codes produced by `InputCodec`; stems are
 ANDed, then scored (`ScoreCandidate`) by direct/ordered match, atomic-match
 tier, frequency, and depth. Component queries also inject exact top-level leaf
 multiset hits from `LEAF_STRUCT` ahead of the normal candidate pool; these hits
@@ -168,7 +190,7 @@ the input against the prefix and codes and returns the uncommitted `pending`
 text; `SaveHybridState` writes it back.
 
 There is **no direct Chinese-character input** in O mode: Chinese characters
-enter the composition only when a pinyin/shuangpin candidate is selected. A
+enter the composition only when a pinyin/code candidate is selected. A
 selected component replaces its pinyin code in the input and is stored as both
 `component` and `code` (so the preedit shows `Oshao` → `O少`). Components picked
 as a multi-character combo are stored as one layer; Backspace removes
@@ -252,7 +274,8 @@ When changing behavior, update both implementations or explicitly state why only
 one changed. Applies to:
 
 - Config keys, defaults, and fallback rules.
-- Pinyin segmentation and flypy/zrm shuangpin decoders.
+- Input code segmentation and `InputCodec` behavior (C++ `rime::Projection`,
+  Lua spelling-algebra engine).
 - O-mode component candidate sources, `PY_CHAR` exact/prefix rules, and limits.
 - Query parsing, matching, scoring, and result limits.
 - Candidate types (`ids_reverse`, `hanzi_result`, `hanzi_component`), text,
@@ -274,12 +297,15 @@ one changed. Applies to:
   Lua; keep them identical.
 - `disabled_blocks` is the union of config values and rules merged from the
   custom file.
-- `valid_pinyins` is the standard pinyin set used for full-pinyin segmentation
-  and shuangpin validation. Do **not** insert `PY_CHAR` keys into it: PY_CHAR
-  includes heteronym/interjection readings such as `m`/`n`, which would make
-  `mn` segment as `m + n` instead of decoding to `miao`.
-- For flypy/zrm, 2-letter chunks are decoded as shuangpin before full-pinyin
-  segmentation; keep this rule when changing `SegmentAlphaString`.
+- `valid_pinyins` is the toneless syllable set fed to `InputCodec`. Do **not**
+  insert `PY_CHAR` keys into it: PY_CHAR includes heteronym/interjection
+  readings such as `m`/`n`, which would pollute the code map.
+- `ids_reverse/algebra` is authoritative. Without rules the code is the full
+  pinyin; with double-pinyin rules, full pinyin is **not** accepted unless a
+  `derive` rule preserves it.
+- Custom pinyin in `ids_custom.txt` must be toneless (`木 mu`, not `木 mù`).
+- `InputCodec` caches are keyed by the algebra fingerprint; include that in
+  query/segment cache keys when adding new caches.
 - Relative data/custom paths resolve first in the user data directory, then the
   shared data directory.
 - Preserve Chinese prompts and candidate comments.
@@ -299,6 +325,7 @@ one changed. Applies to:
 | Change candidate output | `src/ids_reverse_translator.cc` (`Build*`, `BuildComment`), `src/ids_text.cc`, Lua `build_*`/`build_comment` |
 | Add component alias | C++ `CanonMap`, generator `EQUIV_GROUPS`, Lua `CANON_MAP` |
 | Add block name/alias | `ids_store.cc`, both `kBlockNames`, Lua tables, dump script |
+| Change input encoding (spelling algebra) | `src/ids_reverse_input.{h,cc}`, `src/ids_reverse_config.{h,cc}`, Lua `build_codec`/`get_codec`, `README.md` |
 | Change search/ranking | `src/ids_reverse_translator.cc` (`SearchComponents`, `ScoreCandidate`) and/or `src/ids_reverse_search.cc` (`SearchHybrid`), plus Lua equivalents |
 | Change O-mode algebra notation | `src/ids_reverse_config.{h,cc}`, `src/ids_reverse_search.{h,cc}` (`EvaluateRpnComponents`), composer processor, Lua `load_config`/`_rpn`/`search_hybrid` |
 | Change O-mode group editing | `src/ids_reverse_group.{h,cc}`, composer `OnSelectAfter`/`ProcessKeyEvent`, translator `QueryHybrid`, `EvaluateAlgebraExpression`, plus Lua equivalents |

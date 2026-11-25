@@ -18,6 +18,7 @@ local load_start = now()
 local store, err = I.Store.load(bin, "")
 local load_time = now() - load_start
 assert(store, "failed to load " .. bin .. ": " .. tostring(err))
+local full = I.get_codec(store, { algebra = {} })
 
 local function percentile(sorted, p)
   local idx = math.max(1, math.min(#sorted, math.ceil(#sorted * p)))
@@ -65,21 +66,21 @@ local function bench(fn, cold_iter, warm_iter)
 end
 
 local cases = {
-  { "I 单字 木", function() I.search_components(store, "木", 60, "quanpin", nil) end },
-  { "I 双部件 木口", function() I.search_components(store, "木口", 60, "quanpin", nil) end },
-  { "I 拼音 kouhao", function() I.search_components(store, "kouhao", 60, "quanpin", nil) end },
-  { "I 前缀 m", function() I.search_components(store, "m", 60, "quanpin", nil) end },
-  { "O 单部件 木木", function() I.search_hybrid(store, { "木木" }, "quanpin", 60, nil) end },
-  { "O 双部件 木口", function() I.search_hybrid(store, { "木口" }, "quanpin", 60, nil) end },
-  { "O 减法 森-木", function() I.search_hybrid(store, { "森", "-木" }, "quanpin", 60, nil) end },
-  { "O 加减 森-木+氵", function() I.search_hybrid(store, { "森", "-木", "+氵" }, "quanpin", 60, nil) end },
-  { "O 排除 木木!口", function() I.search_hybrid(store, { "木木", "!口" }, "quanpin", 60, nil) end },
-  { "O 递归 章-日十", function() I.search_hybrid(store, { "章", "-日十" }, "quanpin", 60, nil) end },
-  { "O 异体基准 艹亏", function() I.search_hybrid(store, { "艹", "亏" }, "quanpin", 60, nil) end },
-  { "O RPN 森木-氵+", function() I.search_hybrid(store, { "森", "木", "-", "氵", "+" }, "quanpin", 60, nil, "rpn") end },
-  { "O RPN 木木口!", function() I.search_hybrid(store, { "木", "木", "口", "!" }, "quanpin", 60, nil, "rpn") end },
-  { "部件候选 mu", function() I.get_component_candidates(store, "mu", "quanpin", 80) end },
-  { "部件候选 m", function() I.get_component_candidates(store, "m", "quanpin", 80) end },
+  { "I 单字 木", function() I.search_components(store, "木", 60, full, nil) end },
+  { "I 双部件 木口", function() I.search_components(store, "木口", 60, full, nil) end },
+  { "I 拼音 kouhao", function() I.search_components(store, "kouhao", 60, full, nil) end },
+  { "I 前缀 m", function() I.search_components(store, "m", 60, full, nil) end },
+  { "O 单部件 木木", function() I.search_hybrid(store, { "木木" }, full, 60, nil) end },
+  { "O 双部件 木口", function() I.search_hybrid(store, { "木口" }, full, 60, nil) end },
+  { "O 减法 森-木", function() I.search_hybrid(store, { "森", "-木" }, full, 60, nil) end },
+  { "O 加减 森-木+氵", function() I.search_hybrid(store, { "森", "-木", "+氵" }, full, 60, nil) end },
+  { "O 排除 木木!口", function() I.search_hybrid(store, { "木木", "!口" }, full, 60, nil) end },
+  { "O 递归 章-日十", function() I.search_hybrid(store, { "章", "-日十" }, full, 60, nil) end },
+  { "O 异体基准 艹亏", function() I.search_hybrid(store, { "艹", "亏" }, full, 60, nil) end },
+  { "O RPN 森木-氵+", function() I.search_hybrid(store, { "森", "木", "-", "氵", "+" }, full, 60, nil, "rpn") end },
+  { "O RPN 木木口!", function() I.search_hybrid(store, { "木", "木", "口", "!" }, full, 60, nil, "rpn") end },
+  { "部件候选 mu", function() I.get_component_candidates(store, "mu", full, 80) end },
+  { "部件候选 m", function() I.get_component_candidates(store, "m", full, 80) end },
 }
 
 print(string.format("数据加载: %.1f ms (%.1f MB), 字符 %d, token %d, key %d",

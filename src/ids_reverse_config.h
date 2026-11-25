@@ -30,7 +30,9 @@ struct ReverseConfig {
 
   std::string data_path = "ids_data.bin";
   std::string custom_path;
-  std::string shuangpin_scheme = "flypy";
+  // 输入编码使用 Rime 拼写代数（spelling algebra）规则。
+  // 留空表示无规则：输入码就是全拼本身。
+  std::vector<std::string> algebra;
   // O 模式部件代数表示法：infix（中缀，默认）或 rpn（逆波兰后缀）。
   std::string algebra_notation = "infix";
   std::string ids_format = "unicode";

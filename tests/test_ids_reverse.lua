@@ -14,6 +14,21 @@ local I = M._internal
 local store, err = I.Store.load(bin, "")
 assert(store, "failed to load " .. bin .. ": " .. tostring(err))
 
+local full = I.get_codec(store, { algebra = {} })
+local flypy_rules = {
+  "xform/^zh/v/", "xform/^ch/i/", "xform/^sh/u/",
+  "xform/iu$/q/", "xform/(.)ei$/$1w/", "xform/uan$/r/",
+  "xform/[uv]e$/t/", "xform/un$/y/", "xform/uo$/o/", "xform/ie$/p/",
+  "xform/(.)iao$/$1n/", "xform/(.)iang$/$1l/", "xform/(.)iong$/$1s/",
+  "xform/(.)uai$/$1k/", "xform/(.)ing$/$1k/", "xform/(.)ian$/$1m/",
+  "xform/(.)uang$/$1l/", "xform/(.)ai$/$1d/", "xform/(.)en$/$1f/",
+  "xform/(.)eng$/$1g/", "xform/(.)ang$/$1h/", "xform/(.)an$/$1j/",
+  "xform/(.)ou$/$1z/", "xform/(.)ao$/$1c/", "xform/(.)in$/$1b/",
+  "xform/(.)ia$/$1x/", "xform/(.)ua$/$1x/", "xform/(.)ong$/$1s/",
+  "xform/(.)ui$/$1v/",
+}
+local flypy = I.get_codec(store, { algebra = flypy_rules })
+
 local passed = 0
 local function ok(cond, msg)
   if not cond then error("FAIL: " .. msg, 2) end
@@ -55,24 +70,71 @@ ok(I.build_comment(store, wood_id, true, true, true, true, "unicode")
    :find("6728", 1, true) ~= nil, "候选注释包含 Unicode")
 ok(I.ids_of_text(store, "木") ~= "", "IDS 结构输出")
 
-ok(I.decode_shuangpin(store, "kz", "flypy") == "kou", "flypy 双拼 kz -> kou")
-local mn_segs = I.segment_alpha_string(store, "mn", "flypy")
+local kz = flypy:decode_exact("kz")
+ok(#kz == 1 and kz[1] == "kou", "flypy 双拼 kz -> kou")
+local mn_segs = I.segment_alpha_string(store, "mn", flypy)
 ok(#mn_segs == 1 and mn_segs[1] == "miao", "flypy mn -> miao")
-local mn_pending = I.parse_pending_components(store, "mn", "flypy")
+local mn_pending = I.parse_pending_components(store, "mn", flypy)
 ok(mn_pending.valid and #mn_pending.tokens == 1
    and mn_pending.tokens[1] == "miao", "pending mn -> miao")
-local miao_ids = I.get_component_candidates(store, "miao", "flypy", 0)
+local miao_ids = I.get_component_candidates(store, "miao", full, 0)
 local miao_chars = chars(miao_ids)
 ok(contains(miao_chars, "渺") and contains(miao_chars, "妙")
    and contains(miao_chars, "苗"), "miao 部件候选")
-local segs = I.segment_alpha_string(store, "mukou", "quanpin")
+local segs = I.segment_alpha_string(store, "mukou", full)
 ok(#segs == 2 and segs[1] == "mu" and segs[2] == "kou", "全拼切分 mukou")
 
-local pending = I.parse_pending_components(store, "mukou", "quanpin")
+-- 拼写代数
+local mukz = I.segment_alpha_string(store, "mukz", flypy)
+ok(#mukz == 2 and mukz[1] == "mu" and mukz[2] == "kou", "flypy 切分 mukz")
+local strict_kou = I.segment_alpha_string(store, "kou", flypy)
+ok(not (#strict_kou == 1 and strict_kou[1] == "kou"),
+   "严格 algebra 不接受未保留的全拼")
+
+local abbrev = I.build_codec(store, { "abbrev/^([a-z]).+$/$1/" })
+local abbrev_m = abbrev:decode_exact("m")
+ok(#abbrev_m > 10, "abbrev 展开多个拼音")
+local abbrev_seg = abbrev:segment("m")
+ok(#abbrev_seg == 1 and abbrev_seg[1] == "m", "abbrev 歧义编码保留原文")
+
+local derive = I.build_codec(store, { "derive/^([jqxy])u$/$1v/" })
+local d1 = derive:decode_exact("jv")
+local d2 = derive:decode_exact("ju")
+ok(#d1 == 1 and d1[1] == "ju", "derive 新编码")
+ok(#d2 == 1 and d2[1] == "ju", "derive 保留原编码")
+
+local fuzzy = I.build_codec(store, { "fuzz/^zh/z/" })
+local fz = fuzzy:decode_exact("za")
+local has_zha = false
+for _, py in ipairs(fz) do if py == "zha" then has_zha = true end end
+ok(has_zha, "fuzz 生成模糊编码")
+
+local fake = { valid_pinyins = { ["abc"] = true }, num_chars = 0 }
+local xlit = I.build_codec(fake, { "xlit/abc/xyz/" })
+local xl = xlit:decode_exact("xyz")
+ok(#xl == 1 and xl[1] == "abc", "xlit 字符映射")
+local reorder = I.build_codec(fake, { "reorder/cba/" })
+local ro = reorder:decode_exact("cba")
+ok(#ro == 1 and ro[1] == "abc", "reorder 重排")
+local erase = I.build_codec(fake, { "erase/^abc$/" })
+ok(#erase:decode_exact("abc") == 0, "erase 删除整条编码")
+
+local kou_chars = chars(I.get_pinyin_candidates(store, "kou", 0))
+ok(contains(kou_chars, "口"), "标准拼音候选 口")
+
+local mukz_tokens = flypy:segment("mukz")
+ok(#mukz_tokens == 2 and mukz_tokens[1] == "mu" and mukz_tokens[2] == "kou",
+   "flypy 多音节解码")
+local kz_chars = chars(I.get_component_candidates(store, "kz", flypy, 0))
+ok(contains(kz_chars, "口"), "flypy 输入码 kz 候选包含 口")
+local mn_chars = chars(I.get_component_candidates(store, "mn'", flypy, 0))
+ok(contains(mn_chars, "妙"), "flypy 输入码 mn 候选包含 妙")
+
+local pending = I.parse_pending_components(store, "mukou", full)
 ok(pending.valid and #pending.tokens == 2, "pending 多音节解析")
 
 local function first_component(code)
-  local ids = I.get_component_candidates(store, code, "quanpin", 20)
+  local ids = I.get_component_candidates(store, code, full, 20)
   return chars(ids), ids
 end
 local mu_chars = first_component("mu")
@@ -80,24 +142,24 @@ ok(contains(mu_chars, "木") and contains(mu_chars, "目") and contains(mu_chars
    "mu 部件候选")
 
 ok(store.version == 3, "数据版本为 IDS4 v3")
-local sha_ids = I.get_component_candidates(store, "sha", "quanpin", 0)
+local sha_ids = I.get_component_candidates(store, "sha", full, 0)
 local sha_chars = chars(sha_ids)
 ok(#sha_ids > 100, "sha 候选数量 > 100")
 ok(contains(sha_chars, "啥") and contains(sha_chars, "砂")
    and contains(sha_chars, "鲨") and contains(sha_chars, "纱"),
    "sha 包含 啥/砂/鲨/纱")
 ok(contains(sha_chars, "挲"), "sha 包含异读 挲")
-local sh_prefix = I.get_component_candidates(store, "sh", "quanpin", 10)
+local sh_prefix = I.get_component_candidates(store, "sh", full, 10)
 ok(#sh_prefix == 10, "前缀候选保留上限")
 
-local function search(q, mode)
-  return I.search_components(store, q, 60, mode or "quanpin", nil)
+local function search(q, codec)
+  return I.search_components(store, q, 60, codec or full, nil)
 end
-local function hybrid(components, mode)
-  return I.search_hybrid(store, components, mode or "quanpin", 60, nil)
+local function hybrid(components, codec)
+  return I.search_hybrid(store, components, codec or full, 60, nil)
 end
-local function rpn(components, mode)
-  return I.search_hybrid(store, components, mode or "quanpin", 60, nil, "rpn")
+local function rpn(components, codec)
+  return I.search_hybrid(store, components, codec or full, 60, nil, "rpn")
 end
 
 local wood_mouth = chars(search("木口"))
@@ -226,17 +288,17 @@ ok(I.reopen_closed_group("((沙-少))") == "((沙-少)", "退格重开嵌套括�
 ok(I.reopen_closed_group("沙-少") == nil, "普通文本不重开括号")
 ok(I.reopen_closed_group("-(沙-少") == nil, "未闭合括号不重开")
 
-local comps, excludes = I.evaluate_algebra_expression(store, "沐-木", "quanpin")
+local comps, excludes = I.evaluate_algebra_expression(store, "沐-木", full)
 ok(#comps == 1 and comps[1] == "氵" and #excludes == 0,
    "括号求值 沐-木 -> 氵")
-comps, excludes = I.evaluate_algebra_expression(store, "森-木", "quanpin")
+comps, excludes = I.evaluate_algebra_expression(store, "森-木", full)
 ok(#comps == 1 and comps[1] == "林", "括号求值 森-木 -> 林")
-comps, excludes = I.evaluate_algebra_expression(store, "沐!木", "quanpin")
+comps, excludes = I.evaluate_algebra_expression(store, "沐!木", full)
 ok(#comps == 1 and comps[1] == "沐" and #excludes == 1 and excludes[1] == "木",
    "括号求值 沐!木")
-comps, excludes = I.evaluate_algebra_expression(store, "沐 ' - 木", "quanpin")
+comps, excludes = I.evaluate_algebra_expression(store, "沐 ' - 木", full)
 ok(#comps == 1 and comps[1] == "氵", "括号求值忽略分隔符")
-comps, excludes = I.evaluate_algebra_expression(store, "(沐-木)+口", "quanpin")
+comps, excludes = I.evaluate_algebra_expression(store, "(沐-木)+口", full)
 ok(#comps == 2 and comps[1] == "氵" and comps[2] == "口",
    "括号求值支持嵌套")
 ok(I.format_group_component("-", { "氵" }, {}) == "-氵",
@@ -250,7 +312,7 @@ pending = I.replace_last_ascii_run(pending, "木")
 local flow_group = I.parse_single_group(pending .. ")")
 ok(flow_group and flow_group.closed and flow_group.inner == "沐-木",
    "括号编辑流程 沐-木")
-local flow_comps = I.evaluate_algebra_expression(store, flow_group.inner, "quanpin")
+local flow_comps = I.evaluate_algebra_expression(store, flow_group.inner, full)
 ok(#flow_comps == 1 and flow_comps[1] == "氵", "括号编辑流程求值 氵")
 
 local shao_shui = hybrid({ "少", "氵" })
@@ -276,7 +338,7 @@ local cfg = {
   max_results = 60,
   disabled_blocks_enabled = false,
   disabled_blocks = {},
-  shuangpin_scheme = "quanpin",
+  algebra = {},
 }
 I.build_multi_component_candidates(store, { "mu", "kou" },
                                    { start = 0, _end = 5 }, cfg, nil)
@@ -284,6 +346,20 @@ local combo = {}
 for i, cand in ipairs(emitted) do combo[i] = cand.text end
 local combo_text = table.concat(combo, " ")
 ok(contains(combo_text, "木口"), "Omukou 生成 木口 组合候选")
+
+emitted = {}
+local flypy_cfg = {
+  max_results = 60,
+  disabled_blocks_enabled = false,
+  disabled_blocks = {},
+  algebra = flypy_rules,
+}
+I.build_multi_component_candidates(store, flypy:segment("mukz"),
+                                   { start = 0, _end = 4 }, flypy_cfg, nil)
+combo = {}
+for i, cand in ipairs(emitted) do combo[i] = cand.text end
+combo_text = table.concat(combo, " ")
+ok(contains(combo_text, "木口"), "flypy mukz 生成 木口 组合候选")
 
 emitted = {}
 I.build_multi_component_candidates(store, { "mu", "mu" },

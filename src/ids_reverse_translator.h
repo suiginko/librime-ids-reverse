@@ -4,6 +4,7 @@
 #ifndef RIME_IDS_REVERSE_IDS_REVERSE_TRANSLATOR_H_
 #define RIME_IDS_REVERSE_IDS_REVERSE_TRANSLATOR_H_
 
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -19,6 +20,7 @@ struct Segment;
 namespace ids_reverse {
 
 class IdsStore;
+class InputCodec;
 
 class IdsReverseTranslator : public rime::Translator {
  public:
@@ -29,7 +31,7 @@ class IdsReverseTranslator : public rime::Translator {
 
  private:
   bool EnsureLoaded();
-  std::string PinyinMode();
+  const InputCodec& Codec();
 
   // search 模式：直接部件检索。
   rime::an<rime::Translation> QuerySearch(const std::string& input,
@@ -40,9 +42,9 @@ class IdsReverseTranslator : public rime::Translator {
       size_t start_pos,
       size_t end_pos);
   std::vector<uint32_t> Search(const std::string& query_raw,
-                               const std::string& mode);
+                               const InputCodec& codec);
 
-  // hybrid 模式：部件/拼音/双拼混合检索。
+  // hybrid 模式：部件/拼音/输入码混合检索。
   rime::an<rime::Translation> QueryHybrid(const rime::Segment& segment);
   void BuildResultCandidates(IdsStore& store,
                              const std::vector<uint32_t>& results,
@@ -66,6 +68,7 @@ class IdsReverseTranslator : public rime::Translator {
 
   ReverseConfig config_;
   std::string name_space_;
+  std::shared_ptr<const InputCodec> codec_;
 };
 
 }  // namespace ids_reverse
