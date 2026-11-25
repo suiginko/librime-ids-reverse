@@ -323,7 +323,33 @@ int TokenCountOf(const std::vector<TokenCount>& counts, uint16_t token) {
   return 0;
 }
 
+const char* PairedScriptRadical(const std::string& raw) {
+  if (raw == "丝")
+    return "纟";
+  if (raw == "纟")
+    return "丝";
+  if (raw == "糸")
+    return "糹";
+  if (raw == "糹")
+    return "糸";
+  if (raw == "金")
+    return "釒";
+  if (raw == "釒")
+    return "金";
+  if (raw == "食")
+    return "飠";
+  if (raw == "飠")
+    return "食";
+  if (raw == "言")
+    return "訁";
+  if (raw == "訁")
+    return "言";
+  return nullptr;
+}
+
 struct QueryAtoms {
+  std::vector<uint16_t> raw;       // 未经 Canon 的原始输入 token
+  std::vector<uint16_t> paired;    // 简繁成字↔偏旁同源偏好 token
   std::vector<uint16_t> norm;      // 已 Canon 的输入 token
   std::vector<TokenCount> counts;  // 输入原子部件计数
   std::vector<uint16_t> seq;       // 输入原子部件顺序
@@ -333,6 +359,14 @@ bool BuildQueryAtoms(IdsStore& store,
                      const std::vector<std::string>& normalized,
                      QueryAtoms* q) {
   for (const auto& raw : normalized) {
+    uint16_t raw_tok = store.ResolveTerm(raw);
+    if (raw_tok != kNoToken)
+      q->raw.push_back(raw_tok);
+    if (const char* paired_str = PairedScriptRadical(raw)) {
+      uint16_t paired_tok = store.ResolveTerm(paired_str);
+      if (paired_tok != kNoToken)
+        q->paired.push_back(paired_tok);
+    }
     std::string c = Canon(raw);
     uint16_t t = store.ResolveTerm(c);
     if (t == kNoToken)
@@ -487,6 +521,27 @@ int64_t ScoreHybridTokens(IdsStore& store, uint32_t id, const QueryAtoms& q) {
     score += 2000000;
   else if (block == 1)
     score += 1000000;
+
+  int raw_match = 0;
+  for (uint16_t rt : q.raw) {
+    for (uint16_t i = 0; i < leaf_n; ++i) {
+      if (leaves[i] == rt) {
+        ++raw_match;
+        break;
+      }
+    }
+  }
+  int paired_match = 0;
+  for (uint16_t pt : q.paired) {
+    for (uint16_t i = 0; i < leaf_n; ++i) {
+      if (leaves[i] == pt) {
+        ++paired_match;
+        break;
+      }
+    }
+  }
+  score += static_cast<int64_t>(raw_match) * 100000;
+  score += static_cast<int64_t>(paired_match) * 50000;
   return score;
 }
 
@@ -616,9 +671,13 @@ std::vector<uint32_t> RankHybridStrings(
       sc = BoostExactStructureScore(sc);
     scored.push_back({cands[i], sc, i});
   }
-  std::sort(scored.begin(), scored.end(), [](const Scored& a, const Scored& b) {
+  std::sort(scored.begin(), scored.end(), [&](const Scored& a, const Scored& b) {
     if (a.score != b.score)
       return a.score > b.score;
+    uint32_t fa = store.Hot(a.id).freq;
+    uint32_t fb = store.Hot(b.id).freq;
+    if (fa != fb)
+      return fa > fb;
     return a.index < b.index;
   });
   std::vector<uint32_t> out;
@@ -657,9 +716,13 @@ std::vector<uint32_t> RankHybrid(IdsStore& store,
       sc = BoostExactStructureScore(sc);
     scored.push_back({cands[i], sc, i});
   }
-  std::sort(scored.begin(), scored.end(), [](const Scored& a, const Scored& b) {
+  std::sort(scored.begin(), scored.end(), [&](const Scored& a, const Scored& b) {
     if (a.score != b.score)
       return a.score > b.score;
+    uint32_t fa = store.Hot(a.id).freq;
+    uint32_t fb = store.Hot(b.id).freq;
+    if (fa != fb)
+      return fa > fb;
     return a.index < b.index;
   });
   std::vector<uint32_t> out;
