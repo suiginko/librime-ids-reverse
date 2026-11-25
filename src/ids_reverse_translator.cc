@@ -625,6 +625,14 @@ std::vector<std::string> SegmentAlphaString(IdsStore& store,
     return items;
   }
   if (mode == "flypy" || mode == "zrm") {
+    // 2 字母编码优先按双拼解释，避免 "mn" 被全拼切分成 m + n。
+    if (chunk.size() == 2) {
+      std::vector<std::string> sp;
+      if (DecodeShuangpinString(store, chunk, mode, &sp) && !sp.empty()) {
+        g_seg_cache.Put(key, sp);
+        return sp;
+      }
+    }
     // 先尝试全拼切分：若整个字符串能切成一串合法音节，则优先按全拼处理。
     // 这样 Ikouhao / Inihao 这类全拼输入不会被误当成等长的双拼编码。
     std::vector<std::string> segs = SegmentPinyinOptimal(store, chunk);

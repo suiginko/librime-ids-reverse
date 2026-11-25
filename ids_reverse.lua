@@ -33,6 +33,7 @@ local SEC_VAR = 16
 local SEC_TOK_CANON = 17
 local SEC_ATOMIC_SET = 18
 local SEC_LEAF_STRUCT = 19
+local SEC_PY_CHAR = 20
 
 local NO_TOKEN = 0xFFFF
 local INVALID_ID = 0xFFFFFFFF
@@ -422,7 +423,7 @@ function Store.load(path, custom_path)
 
   local magic, version, flags, max_cp, num_chars, nkeys, nsec =
       string.unpack("<c4HHIIII", blob, 1)
-  if version ~= 2 then
+  if version ~= 3 then
     return nil, "old IDS4 data (version " .. tostring(version) ..
                 "), please regenerate ids_data.bin"
   end
@@ -444,7 +445,7 @@ function Store.load(path, custom_path)
   local required = {
     SEC_CP2ID, SEC_ID2CP, SEC_HOT, SEC_COLD_IDX, SEC_ALTS, SEC_LEAVES,
     SEC_ATOMS, SEC_COMPSET, SEC_COLD, SEC_POST, SEC_KEY_LOOKUP, SEC_TOKENS,
-    SEC_PY, SEC_KEY_REC, SEC_LEAF_STRUCT,
+    SEC_PY, SEC_PY_CHAR, SEC_KEY_REC, SEC_LEAF_STRUCT,
   }
   for _, t in ipairs(required) do
     if not self.sections[t] then return nil, "missing section " .. t end
@@ -489,6 +490,9 @@ function Store.load(path, custom_path)
 
   self:parse_tokens()
   self:parse_py()
+  if not self:parse_py_char() then
+    return nil, "bad PY_CHAR section"
+  end
   self:parse_key_recs()
   self:parse_atomic_set()
   self.custom_disabled_blocks = {}
@@ -668,6 +672,34 @@ function Store:parse_py()
     end
     self.py_map[py] = ids
     self.valid_pinyins[py] = true
+  end
+  return true
+end
+
+function Store:parse_py_char()
+  local sec = self.sections[SEC_PY_CHAR]
+  local p = sec.off
+  local endp = sec.off + sec.len
+  if p + 2 > endp then return false end
+  local np = rd16(self.blob, p)
+  p = p + 2
+  self.py_char_map = {}
+  for _ = 1, np do
+    if p + 2 > endp then return false end
+    local len = rd16(self.blob, p)
+    p = p + 2
+    if p + len + 2 > endp then return false end
+    local py = self.blob:sub(p + 1, p + len)
+    p = p + len
+    local m = rd16(self.blob, p)
+    p = p + 2
+    if p + m * 4 > endp then return false end
+    local ids = {}
+    for j = 1, m do
+      ids[j] = rd32(self.blob, p)
+      p = p + 4
+    end
+    self.py_char_map[py] = ids
   end
   return true
 end
@@ -1273,6 +1305,14 @@ local function segment_alpha_string(store, chunk, mode)
     return r
   end
   if mode == "flypy" or mode == "zrm" then
+    -- 2 字母编码优先按双拼解释，避免 "mn" 被全拼切分成 m + n。
+    if #chunk == 2 then
+      local sp = decode_shuangpin_string(store, chunk, mode)
+      if sp and #sp > 0 then
+        cache_put(seg_cache, key, sp, 2048)
+        return sp
+      end
+    end
     local segs = segment_pinyin_optimal(store, chunk)
     if #segs > 0 then
       local all_valid = true
@@ -3096,11 +3136,47 @@ local function get_component_candidates(store, raw_code, mode, limit)
   if code == "" then return {} end
   code = ascii_lower(code)
   if not is_ascii_alpha_only(code) then return {} end
+
+  local pcm = store.py_char_map
   local lookup = code
-  if not store.py_map[lookup] and #lookup == 2 then
+  if not ((pcm and pcm[lookup]) or store.py_map[lookup]) and #lookup == 2 then
     local decoded = decode_shuangpin(store, lookup, mode)
     if decoded ~= lookup then lookup = decoded end
   end
+
+  -- v3 数据：完整字符拼音索引优先。精确单音节不设上限。
+  if pcm and next(pcm) then
+    local exact = pcm[lookup]
+    if exact then
+      local ids = {}
+      for i = 1, #exact do ids[i] = exact[i] end
+      return ids
+    end
+    local ids, seen = {}, {}
+    for py, list in pairs(pcm) do
+      if starts_with(py, lookup) then
+        for _, id in ipairs(list) do
+          if not seen[id] then
+            seen[id] = true
+            ids[#ids + 1] = id
+          end
+        end
+      end
+    end
+    table.sort(ids, function(a, b)
+      local fa, fb = store:hot(a).freq, store:hot(b).freq
+      if fa ~= fb then return fa > fb end
+      return a < b
+    end)
+    if limit and limit > 0 and #ids > limit then
+      local r = {}
+      for i = 1, limit do r[i] = ids[i] end
+      ids = r
+    end
+    return ids
+  end
+
+  -- 兼容旧数据（理论上 v3 不允许缺少 PY_CHAR）。
   local tokens
   local pit = store.py_map[lookup]
   if pit then
@@ -3128,7 +3204,7 @@ local function get_component_candidates(store, raw_code, mode, limit)
     end
   end
   table.sort(ids, function(a, b) return store:hot(a).freq > store:hot(b).freq end)
-  if #ids > limit then
+  if limit and limit > 0 and #ids > limit then
     local r = {}
     for i = 1, limit do r[i] = ids[i] end
     ids = r

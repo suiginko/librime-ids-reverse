@@ -1160,6 +1160,69 @@ def main():
     N = len(chars)
     id_of_cp = {cp: i for i, cp in enumerate(chars)}
 
+    # ---- 全字符拼音索引（含异读）----
+    # O 模式部件候选需要覆盖所有字，而不只是倒排索引里出现过的部件。
+    freq_by_cp = {rec[0]: rec[1] for rec in meta_records}
+
+    def strip_tone(py):
+        py = py.replace('ü', 'v').replace('Ü', 'V')
+        out = []
+        for c in unicodedata.normalize('NFKD', py):
+            if unicodedata.combining(c):
+                continue
+            out.append(c)
+        return ''.join(out).lower()
+
+    def char_readings(ch, cp):
+        readings = set()
+        try:
+            res = pypinyin.pinyin(ch, style=pypinyin.Style.NORMAL,
+                                  heteronym=True, errors='ignore')
+            if res and res[0]:
+                readings.update(py for py in res[0] if py and py.isalpha())
+        except Exception:
+            pass
+        if not readings:
+            rec = meta_by_cp.get(cp)
+            py_display = rec[4] if rec else ''
+            if py_display:
+                py = strip_tone(py_display)
+                if py and py.isalpha():
+                    readings.add(py)
+        if not readings:
+            canon_ch = resolve_unified_char(cp, ch)
+            if canon_ch and canon_ch != ch:
+                try:
+                    res = pypinyin.pinyin(canon_ch,
+                                          style=pypinyin.Style.NORMAL,
+                                          heteronym=True, errors='ignore')
+                    if res and res[0]:
+                        readings.update(py for py in res[0]
+                                        if py and py.isalpha())
+                except Exception:
+                    pass
+        return readings
+
+    pinyin_to_chars = collections.defaultdict(set)
+    for i, cp in enumerate(chars):
+        ch = chr(cp)
+        for py in char_readings(ch, cp):
+            pinyin_to_chars[py].add(i)
+    # 合并既有部件读音表（RADICAL_PINYIN / excel 表），确保自定义读音也进入
+    # O 模式候选。
+    for py, comps in pinyin_to_comps.items():
+        for comp in comps:
+            if len(comp) != 1:
+                continue
+            cid = id_of_cp.get(ord(comp))
+            if cid is not None:
+                pinyin_to_chars[py].add(cid)
+    for py, ids in list(pinyin_to_chars.items()):
+        pinyin_to_chars[py] = sorted(
+            ids, key=lambda cid: (-freq_by_cp.get(chars[cid], 0), cid))
+    print(f"PY_CHAR: {len(pinyin_to_chars)} pinyin keys, "
+          f"{sum(len(v) for v in pinyin_to_chars.values())} char entries.")
+
     # ---- 预计算顶层叶子 / 原子部件（与运行时语义一致）----
     primary_ids = {}
     for cp in chars:
@@ -1422,6 +1485,17 @@ def main():
         for t in ids:
             PB += struct.pack('<H', t)
 
+    # ---- PY_CHAR: pinyin -> all character ids (heteronyms, freq-desc) ----
+    pc_items = sorted(pinyin_to_chars.items())
+    PC = bytearray()
+    PC += struct.pack('<H', len(pc_items))
+    for py, cids in pc_items:
+        pbs = py.encode('utf-8')
+        PC += struct.pack('<H', len(pbs)); PC += pbs
+        PC += struct.pack('<H', len(cids))
+        for cid in cids:
+            PC += struct.pack('<I', cid)
+
     # ---- KEY_LOOKUP / KEY_REC / POST ----
     K = 1024
     BITSET_BYTES = ((N + 63) // 64) * 8
@@ -1485,6 +1559,7 @@ def main():
         (3, bytes(CHAR)), (1, bytes(CP2ID)),
         (12, KL), (13, bytes(KEY_REC)),
         (10, bytes(TB)), (17, CANON), (18, bytes(AS)), (11, bytes(PB)),
+        (20, bytes(PC)),
         (6, bytes(LEAVES)), (7, bytes(ATOMS)), (19, bytes(LS)),
         (5, bytes(ALTS)), (8, bytes(CS)),
         (14, bytes(POST)),
@@ -1504,7 +1579,7 @@ def main():
         table += struct.pack('<IIQQ', sec_type, 0, offset, len(data))
         blobs.append((offset, data))
         offset += len(data)
-    header = struct.pack('<4sHHIIIIII', b'IDS4', 2, 0, MAX_CP, N,
+    header = struct.pack('<4sHHIIIIII', b'IDS4', 3, 0, MAX_CP, N,
                          len(KEY_REC) // 20, len(sections), 0, 0)
 
     out = "ids_data.bin"

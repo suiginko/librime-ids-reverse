@@ -15,12 +15,13 @@ Lua 5.5 版见下文「Lua 5.5 版本」。
 
 ---
 
-## 数据格式（IDS4 v2）
+## 数据格式（IDS4 v3）
 
 单文件 `ids_data.bin`（约 30MB），面向**查询延迟**设计：`mmap` 惰性映射、
 稠密字 id、整数部件匹配、预计算叶子/原子部件、整数倒排键、每键连续 postings。
 
-> IDS4 v1 不含结构索引，读取时会要求重新生成 `ids_data.bin`。
+> IDS4 v3 必须包含 `PY_CHAR` section。旧 v2/v1/IDS3 数据文件会在加载时报错，
+> 需要重新生成 `ids_data.bin`。
 
 - **稠密 id**：103k+ 汉字映射到 `0..N-1`（`CP2ID`/`ID2CP`）。
 - **CHAR**：每字 24 字节定长记录 `{freq, flags, char_token, depth, block,
@@ -40,10 +41,12 @@ Lua 5.5 版见下文「Lua 5.5 版本」。
     其余用 id 升序 `u32`；位图阈值 `>1024`。
   - 单 term 查询直接使用字频序 `head`，不再遍历十万级完整倒排。
 - **PY/TOKENS**：拼音→token、token 词表（含码点）。
+- **PY_CHAR**：无调拼音→全部字符 id（含异读、按字频降序），供 O 模式部件选择；
+  完整单音节候选不设上限。
 
 区间（section）采用节表，全部定长、小端、8 字节对齐，并按冷热排序：
-`CHAR → CP2ID → KEY_* → TOKENS → LEAVES/ATOMS/LEAF_STRUCT → ALTS/COMPSET →
-POST → COLD → VAR → ID2CP`。
+`CHAR → CP2ID → KEY_* → TOKENS → PY/PY_CHAR → LEAVES/ATOMS/LEAF_STRUCT →
+ALTS/COMPSET → POST → COLD → VAR → ID2CP`。
 
 ---
 
@@ -320,8 +323,9 @@ ids_reverse:
   head 影响。例如 `O了` 的 `𠄏`（`⿿了`，旋转操作符不参与部件匹配）、`O匕匕`
   的 `𫧇`。
 
-O 模式自带的部件候选来自 `ids_data.bin`，因此即使当前方案没有拼音词典，也可以完成
-`O` + 拼音/双拼选部件。
+O 模式自带的部件候选来自 `ids_data.bin` 的 `PY_CHAR`，因此即使当前方案没有拼音词典，
+也可以完成 `O` + 拼音/双拼选部件。候选包含该读音的全部字符（包括 `pypinyin` 异读），
+完整单音节不设数量上限；仅前缀/未完成拼音保留上限。
 
 ---
 
@@ -381,10 +385,10 @@ python3 generate_data_v4.py    # 依赖 pypinyin
 - `ids_variants.txt`（异体字表，`原始汉字\t异体字（空格分隔）`）
 - `wanxiang_charset.dict.yaml`（可选的本地字符集来源，不存在则跳过）
 
-产出 `ids_data.bin`（IDS4 v2，约 30MB）。该文件被 `.gitignore` 忽略，需要本地生成或从发布包获取。
+产出 `ids_data.bin`（IDS4 v3，约 30MB）。该文件被 `.gitignore` 忽略，需要本地生成或从发布包获取。
 
-> IDS4 v2 与 IDS4 v1、旧 IDS3 数据文件不兼容。升级插件后必须重新生成 `ids_data.bin`；
-> 读取到旧 magic 时会直接加载失败。
+> IDS4 v3 与 v2/v1、旧 IDS3 数据文件不兼容。升级插件后必须重新生成 `ids_data.bin`；
+> 读取到旧版本号时会直接加载失败。
 
 数据检查：
 
@@ -436,6 +440,7 @@ O 模式：
 - `Omumu` → 组合候选 `木木`，选中后得到 `林`
 - `Oshao` → 选 `少`；`(mu` → 选 `沐`；`-mu` → 选 `木`；`)` → 首选 `沙`
 - `Omiao` → 选 `渺`；`-(shui` → 选 `水`；`)` → 按减法处理
+- `Osha` → 精确音节 `sha` 的全部候选（含 啥 / 砂 / 鲨 / 纱 / 挲 等，不截断）
 - `Osen` → 选 `森`；`(mumu` → 选 `木木`；`)` → 首选 `木`
 - `Omu` → 选 `木`；`Omu` → 选 `木`；`!(kouri` → 选 `口日`；`)` → 排除含 `口` / `日` 的字
 - `O佩-亻` → `𫥞`，随后列出包含 `𫥞` 的字

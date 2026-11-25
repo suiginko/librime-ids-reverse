@@ -56,6 +56,15 @@ ok(I.build_comment(store, wood_id, true, true, true, true, "unicode")
 ok(I.ids_of_text(store, "木") ~= "", "IDS 结构输出")
 
 ok(I.decode_shuangpin(store, "kz", "flypy") == "kou", "flypy 双拼 kz -> kou")
+local mn_segs = I.segment_alpha_string(store, "mn", "flypy")
+ok(#mn_segs == 1 and mn_segs[1] == "miao", "flypy mn -> miao")
+local mn_pending = I.parse_pending_components(store, "mn", "flypy")
+ok(mn_pending.valid and #mn_pending.tokens == 1
+   and mn_pending.tokens[1] == "miao", "pending mn -> miao")
+local miao_ids = I.get_component_candidates(store, "miao", "flypy", 0)
+local miao_chars = chars(miao_ids)
+ok(contains(miao_chars, "渺") and contains(miao_chars, "妙")
+   and contains(miao_chars, "苗"), "miao 部件候选")
 local segs = I.segment_alpha_string(store, "mukou", "quanpin")
 ok(#segs == 2 and segs[1] == "mu" and segs[2] == "kou", "全拼切分 mukou")
 
@@ -69,6 +78,17 @@ end
 local mu_chars = first_component("mu")
 ok(contains(mu_chars, "木") and contains(mu_chars, "目") and contains(mu_chars, "母"),
    "mu 部件候选")
+
+ok(store.version == 3, "数据版本为 IDS4 v3")
+local sha_ids = I.get_component_candidates(store, "sha", "quanpin", 0)
+local sha_chars = chars(sha_ids)
+ok(#sha_ids > 100, "sha 候选数量 > 100")
+ok(contains(sha_chars, "啥") and contains(sha_chars, "砂")
+   and contains(sha_chars, "鲨") and contains(sha_chars, "纱"),
+   "sha 包含 啥/砂/鲨/纱")
+ok(contains(sha_chars, "挲"), "sha 包含异读 挲")
+local sh_prefix = I.get_component_candidates(store, "sh", "quanpin", 10)
+ok(#sh_prefix == 10, "前缀候选保留上限")
 
 local function search(q, mode)
   return I.search_components(store, q, 60, mode or "quanpin", nil)

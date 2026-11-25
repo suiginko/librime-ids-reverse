@@ -50,6 +50,7 @@ enum SectionType {
   kSecTokCanon = 17,
   kSecAtomicSet = 18,
   kSecLeafStruct = 19,
+  kSecPyChar = 20,
 };
 
 // 顶层部件多重集精确匹配的排序保底。普通 ALTS 伪精确匹配最高约 5700 万，
@@ -396,6 +397,10 @@ class IdsStore {
   const std::map<std::string, std::vector<uint16_t>>& py_map() const {
     return py_map_;
   }
+  // O 模式部件候选：无调拼音 -> 全字符 id（按字频降序）。
+  const std::map<std::string, std::vector<uint32_t>>& py_char_map() const {
+    return py_char_map_;
+  }
   const rime::hash_set<std::string>& valid_pinyins() const {
     return valid_pinyins_;
   }
@@ -447,6 +452,7 @@ class IdsStore {
   std::vector<KeyRec> key_entries_;
 
   std::map<std::string, std::vector<uint16_t>> py_map_;
+  std::map<std::string, std::vector<uint32_t>> py_char_map_;
   rime::hash_set<std::string> valid_pinyins_;
   rime::hash_set<int> custom_disabled_blocks_;
   bool loaded_ = false;

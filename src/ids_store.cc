@@ -146,8 +146,8 @@ IdsStore::~IdsStore() = default;
 bool IdsStore::Parse() {
   if (size_ < 32 || std::memcmp(base_, "IDS4", 4) != 0)
     return false;
-  if (Rd16(base_ + 4) != 2)
-    return false;  // 旧版 IDS4 缺少 LEAF_STRUCT，必须重新生成。
+  if (Rd16(base_ + 4) != 3)
+    return false;  // 仅支持 IDS4 v3（含必需 PY_CHAR section）。
   max_cp_ = Rd32(base_ + 8);
   num_chars_ = Rd32(base_ + 12);
   uint32_t nkeys = Rd32(base_ + 16);
@@ -160,6 +160,8 @@ bool IdsStore::Parse() {
   uint64_t tokens_len = 0;
   const uint8_t* py_sec = nullptr;
   uint64_t py_len = 0;
+  const uint8_t* pychar_sec = nullptr;
+  uint64_t pychar_len = 0;
   const uint8_t* keyrec_sec = nullptr;
   uint64_t keyrec_len = 0;
   const uint8_t* atomset_sec = nullptr;
@@ -211,6 +213,10 @@ bool IdsStore::Parse() {
         py_sec = p;
         py_len = len;
         break;
+      case kSecPyChar:
+        pychar_sec = p;
+        pychar_len = len;
+        break;
       case kSecKeyLookup:
         key_lookup_ = reinterpret_cast<const uint32_t*>(p);
         break;
@@ -244,7 +250,7 @@ bool IdsStore::Parse() {
   }
   if (!cp2id_ || !id2cp_ || !hot_ || !cold_idx_ || !alts_ || !leaves_ ||
       !atoms_ || !compset_ || !cold_ || !post_ || !key_lookup_ || !tokens_sec ||
-      !py_sec || !keyrec_sec || !leaf_struct_sec || !tok_canon_)
+      !py_sec || !pychar_sec || !keyrec_sec || !leaf_struct_sec || !tok_canon_)
     return false;
 
   // LEAF_STRUCT: u32 count + count * {u32 hash, u32 id}
@@ -313,6 +319,37 @@ bool IdsStore::Parse() {
       }
       valid_pinyins_.insert(py);
       py_map_[py] = std::move(ids);
+    }
+  }
+
+  // PY_CHAR: pinyin -> all character ids（O 模式候选，含异读）。
+  {
+    const uint8_t* p = pychar_sec;
+    const uint8_t* end = pychar_sec + pychar_len;
+    if (p + 2 > end)
+      return false;
+    uint16_t np = Rd16(p);
+    p += 2;
+    for (uint16_t k = 0; k < np; ++k) {
+      if (p + 2 > end)
+        return false;
+      uint16_t len = Rd16(p);
+      p += 2;
+      if (p + len + 2 > end)
+        return false;
+      std::string py(reinterpret_cast<const char*>(p), len);
+      p += len;
+      uint16_t m = Rd16(p);
+      p += 2;
+      if (p + static_cast<size_t>(m) * 4 > end)
+        return false;
+      std::vector<uint32_t> ids;
+      ids.reserve(m);
+      for (uint16_t j = 0; j < m; ++j) {
+        ids.push_back(Rd32(p));
+        p += 4;
+      }
+      py_char_map_[py] = std::move(ids);
     }
   }
 

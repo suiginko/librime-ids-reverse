@@ -18,7 +18,7 @@ SECTION_NAMES = {
     6: "LEAVES", 7: "ATOMS", 8: "COMPSET", 9: "COLD", 10: "TOKENS",
     11: "PY", 12: "KEY_LOOKUP", 13: "KEY_REC", 14: "POST",
     15: "VAR_OFF", 16: "VAR", 17: "TOK_CANON", 18: "ATOMIC_SET",
-    19: "LEAF_STRUCT",
+    19: "LEAF_STRUCT", 20: "PY_CHAR",
 }
 
 
@@ -35,6 +35,10 @@ def dump_ids4(bin_path, output_path=None, sample_count=None):
         '<4sHHIIII', header[:24])
     if magic != b'IDS4':
         print(f"Error: Invalid magic {magic}, expected IDS4")
+        return
+    if ver != 3:
+        print(f"Error: Unsupported IDS4 version {ver}, expected 3; "
+              f"please regenerate ids_data.bin")
         return
 
     print("=== IDS4 Binary Data Overview ===")
@@ -62,6 +66,29 @@ def dump_ids4(bin_path, output_path=None, sample_count=None):
             h = struct.unpack('<I', blob[off + 4 + i * 8:off + 8 + i * 8])[0]
             hashes.add(h)
         print(f"  LEAF_STRUCT: {ls_count} records, {len(hashes)} unique hashes")
+
+    if 20 not in sections:
+        print("Error: missing required PY_CHAR section")
+        return
+    off, length = sections[20]
+    py_count = struct.unpack('<H', blob[off:off + 2])[0]
+    p = off + 2
+    py_entries = 0
+    sha_chars = []
+    for _ in range(py_count):
+        py_len = struct.unpack('<H', blob[p:p + 2])[0]
+        p += 2
+        py = blob[p:p + py_len].decode('utf-8')
+        p += py_len
+        n = struct.unpack('<H', blob[p:p + 2])[0]
+        p += 2
+        ids = struct.unpack('<' + 'I' * n, blob[p:p + n * 4]) if n else ()
+        p += n * 4
+        py_entries += n
+        if py == 'sha':
+            sha_chars = list(ids)
+    print(f"  PY_CHAR: {py_count} pinyin keys, {py_entries} char entries; "
+          f"sha={len(sha_chars)}")
 
     id2cp_off, _ = sections[2]
     char_off, _ = sections[3]

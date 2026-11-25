@@ -1373,19 +1373,48 @@ std::vector<uint32_t> GetComponentCandidates(IdsStore& store,
   if (!IsAsciiAlphaOnly(code))
     return {};
 
+  const auto& py_char_map = store.py_char_map();
   std::string lookup = code;
-  if (!store.py_map().count(lookup) && lookup.size() == 2) {
+  if (!py_char_map.count(lookup) && lookup.size() == 2) {
     std::string decoded = DecodeShuangpin(store, lookup, mode);
     if (decoded != lookup)
       lookup = decoded;
   }
 
+  // v3 数据：完整字符拼音索引优先。精确单音节不设上限。
+  if (!py_char_map.empty()) {
+    auto exact = py_char_map.find(lookup);
+    if (exact != py_char_map.end())
+      return exact->second;
+    // 前缀匹配保留上限，避免一次列出上万字。
+    std::vector<uint32_t> ids;
+    hash_set<uint32_t> seen;
+    for (const auto& kv : py_char_map) {
+      if (!StartsWith(kv.first, lookup))
+        continue;
+      for (uint32_t id : kv.second) {
+        if (seen.insert(id).second)
+          ids.push_back(id);
+      }
+    }
+    std::sort(ids.begin(), ids.end(), [&](uint32_t a, uint32_t b) {
+      uint32_t fa = store.Hot(a).freq;
+      uint32_t fb = store.Hot(b).freq;
+      if (fa != fb)
+        return fa > fb;
+      return a < b;
+    });
+    if (limit > 0 && ids.size() > limit)
+      ids.resize(limit);
+    return ids;
+  }
+
+  // 兼容旧数据（理论上 v3 不允许缺少 PY_CHAR）。
   std::vector<uint16_t> tokens;
   auto pit = store.py_map().find(lookup);
   if (pit != store.py_map().end()) {
     tokens = pit->second;
   } else {
-    // 前缀匹配：输入 mu 时同时给出木/目/母等，输入 m 时给出全部 m 开头部件。
     hash_set<uint16_t> seen;
     for (const auto& kv : store.py_map()) {
       if (!StartsWith(kv.first, lookup))
@@ -1411,7 +1440,7 @@ std::vector<uint32_t> GetComponentCandidates(IdsStore& store,
   std::sort(ids.begin(), ids.end(), [&](uint32_t a, uint32_t b) {
     return store.Hot(a).freq > store.Hot(b).freq;
   });
-  if (ids.size() > limit)
+  if (limit > 0 && ids.size() > limit)
     ids.resize(limit);
   return ids;
 }
