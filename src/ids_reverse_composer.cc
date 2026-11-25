@@ -728,6 +728,7 @@ bool IdsReverseSegmentor::Proceed(Segmentation* segmentation) {
     if (start == 0) {
       seg.tags.insert(config_.hybrid.tag);
     } else {
+      seg.tags.insert("phony");
       seg.tags.insert(config_.hybrid.tag);
       seg.tags.insert(kResultSegmentTag);
     }

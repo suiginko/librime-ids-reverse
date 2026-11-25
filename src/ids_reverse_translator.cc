@@ -1971,7 +1971,7 @@ void IdsReverseTranslator::BuildResultCandidates(
     if (config_.has_sw_block)
       show_block = ctx->get_option("show_block");
   }
-  std::string preedit = "\xe2\x80\x8b";
+  std::string preedit;
   if (ctx && segment.end > segment.start &&
       segment.end <= static_cast<int>(ctx->input().size())) {
     std::string seg_text =
@@ -2225,7 +2225,7 @@ rime::an<rime::Translation> IdsReverseTranslator::QueryHybrid(
     }
     // 部件形式的状态末尾带有分隔引号，用空 preedit 隐藏它；
     // raw 表达式形式则保留原始输入作为 preedit。
-    std::string preedit = pending.empty() ? "\xe2\x80\x8b" : std::string();
+    std::string preedit;
     auto cand = rime::New<rime::SimpleCandidate>("ids_reverse", segment.start,
                                                  segment.end, variant_result,
                                                  comment, preedit);
