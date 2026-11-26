@@ -194,11 +194,16 @@ void CollectSubtractableParts(IdsStore& store,
       basics->push_back(glyph);
     return;
   }
-  // 含笔画的字（如 少 = 小 + 丿）视为可减的基本部件，不再继续拆成笔画。
+  // 含笔画的字（如 少 = 小 + 丿）在子层视为基本部件不再拆成笔画；
+  // 若是根节点自身（如 术 = 木 + 丶、丁 = 一 + 亅），直接保留其顶层叶子。
   for (const auto& leaf : leaves) {
     if (IsStrokeGlyph(leaf)) {
-      if (!is_root)
+      if (is_root) {
+        for (const auto& dl : leaves)
+          basics->push_back(dl);
+      } else {
         basics->push_back(glyph);
+      }
       return;
     }
   }
@@ -1565,37 +1570,91 @@ std::vector<std::string> GetSubtractableParts(
 
   hash_set<std::string> seen;
   seen.insert(Canon(target));
-  auto add = [&](const std::vector<std::string>& list) {
+  auto is_captured = [&](const std::string& part) -> bool {
+    // 若更早的正向操作数已经能减掉该部件，实际会作用到更早部件，跳过，
+    // 避免提示与实际扣减目标不一致。
+    for (size_t i = 0; i + 1 < components.size(); ++i) {
+      const std::string& comp = components[i];
+      if (comp.empty() || comp[0] == '-' || comp[0] == '+' || comp[0] == '!')
+        continue;
+      if (SubtractCharacter(store, comp, part, 0))
+        return true;
+    }
+    return false;
+  };
+
+  auto add = [&](const std::vector<std::string>& list, bool allow_stroke) {
     if (parts.size() >= 8)
       return;
     for (const auto& part : list) {
       if (parts.size() >= 8)
         return;
-      if (part.empty() || IsStrokeGlyph(part))
+      if (part.empty() || (!allow_stroke && IsStrokeGlyph(part)))
         continue;
       std::string key = Canon(part);
       if (!seen.insert(key).second)
         continue;
       if (!SubtractCharacter(store, target, part, 0))
         continue;
-      // 若更早的正向操作数已经能减掉该部件，实际会作用到更早部件，跳过，
-      // 避免提示与实际扣减目标不一致。
-      bool captured = false;
-      for (size_t i = 0; i + 1 < components.size(); ++i) {
-        const std::string& comp = components[i];
-        if (comp.empty() || comp[0] == '-' || comp[0] == '+' || comp[0] == '!')
-          continue;
-        if (SubtractCharacter(store, comp, part, 0)) {
-          captured = true;
-          break;
-        }
-      }
-      if (!captured)
+      if (!is_captured(part))
         parts.push_back(part);
     }
   };
-  add(basics);
-  add(intermediates);
+  add(basics, /*allow_stroke=*/true);
+  add(intermediates, /*allow_stroke=*/false);
+
+  // 第二梯队补充：从 CompSet 补充跨枝复合部件（如 渺->泪、屡->屎），按字频降序。
+  size_t pos = 0;
+  uint32_t target_cp = DecodeNext(target, &pos);
+  uint32_t target_id = target_cp != 0 ? store.IdOfCp(target_cp) : kInvalidId;
+  if (target_id != kInvalidId && parts.size() < 8) {
+    hash_set<uint16_t> tier1_sub;
+    for (const auto& b : basics) {
+      size_t bpos = 0;
+      uint32_t bcp = DecodeNext(b, &bpos);
+      uint32_t bid = bcp != 0 ? store.IdOfCp(bcp) : kInvalidId;
+      if (bid != kInvalidId) {
+        const uint16_t* cs = nullptr;
+        uint16_t cs_n = 0;
+        store.CompSet(bid, &cs, &cs_n);
+        for (uint16_t i = 0; i < cs_n; ++i)
+          tier1_sub.insert(cs[i]);
+      }
+    }
+    std::vector<std::pair<std::string, uint32_t>> extra;
+    const uint16_t* tcs = nullptr;
+    uint16_t tcs_n = 0;
+    store.CompSet(target_id, &tcs, &tcs_n);
+    for (uint16_t i = 0; i < tcs_n; ++i) {
+      uint16_t tok = tcs[i];
+      if (tier1_sub.count(tok))
+        continue;
+      const std::string& p = store.TokenStr(tok);
+      std::string key = Canon(p);
+      if (p.empty() || seen.count(key) || IsStrokeGlyph(p))
+        continue;
+      uint32_t pcp = store.TokenCp(tok);
+      uint32_t pid = pcp != 0 ? store.IdOfCp(pcp) : kInvalidId;
+      if (pid != kInvalidId) {
+        const uint16_t* lvs = nullptr;
+        uint16_t lvs_n = 0;
+        store.Leaves(pid, &lvs, &lvs_n);
+        if (lvs_n >= 2)
+          extra.emplace_back(p, store.Hot(pid).freq);
+      }
+    }
+    std::stable_sort(
+        extra.begin(), extra.end(),
+        [](const auto& a, const auto& b) { return a.second > b.second; });
+    for (const auto& item : extra) {
+      if (parts.size() >= 8)
+        break;
+      if (!seen.insert(Canon(item.first)).second)
+        continue;
+      if (!is_captured(item.first))
+        parts.push_back(item.first);
+    }
+  }
   return parts;
 }
 
