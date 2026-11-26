@@ -5606,7 +5606,8 @@ local function filter_func(input, env)
     if scanned > 2000 then break end
     local genuine = cand:get_genuine()
     local ctype = genuine and genuine.type or cand.type
-    if ctype == "ids_reverse" or ctype == "hanzi_result" then
+    if ctype == "ids_reverse" or ctype == "hanzi_result"
+       or ctype == "hanzi_component" then
       yield(cand)
     elseif ctx.composition:empty() then
       yield(cand)

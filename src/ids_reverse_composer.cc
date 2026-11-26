@@ -911,7 +911,8 @@ class HybridFilterTranslation : public rime::PrefetchTranslation {
       translation_->Next();
       an<Candidate> genuine = Candidate::GetGenuineCandidate(next);
       const std::string& type = genuine ? genuine->type() : next->type();
-      if (type == "ids_reverse" || type == "hanzi_result") {
+      if (type == "ids_reverse" || type == "hanzi_result" ||
+          type == "hanzi_component") {
         cache_.push_back(next);
         continue;
       }
