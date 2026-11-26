@@ -44,6 +44,7 @@ class IdsReverseProcessor : public rime::Processor {
   bool selected_is_result_ = false;
   std::string selected_text_;
   std::string selected_component_;
+  std::string selected_tail_;
   bool saved_auto_commit_ = false;
   rime::KeyEvent variant_replace_key_;
   bool has_variant_replace_key_ = false;

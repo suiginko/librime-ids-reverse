@@ -4462,6 +4462,12 @@ local function selected_segment(ctx)
   local segs = comp:toSegmentation()
   local n = segs.size
   if n <= 0 then return nil end
+  for i = n - 1, 0, -1 do
+    local s = segs:get_at(i)
+    if s and s.status == "kSelected" then
+      return s
+    end
+  end
   local last = segs:get_at(n - 1)
   if n >= 2 and last and last.start == last._end then
     return segs:get_at(n - 2)
@@ -4729,11 +4735,15 @@ local function on_select(ctx, env)
       component = first .. component
     end
   end
+  local tail = ""
+  if cand._end > 0 and cand._end < #ctx.input then
+    tail = ctx.input:sub(cand._end + 1)
+  end
   local base = ctx.input:sub(1, #ctx.input - #st.pending)
   st.components[#st.components + 1] = component
   st.codes[#st.codes + 1] = component
   save_hybrid_state(ctx, st.components, st.codes)
-  ctx.input = base .. component .. "'"
+  ctx.input = base .. component .. "'" .. tail
 end
 
 local function on_update(ctx, env)

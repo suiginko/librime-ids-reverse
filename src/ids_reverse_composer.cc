@@ -226,6 +226,12 @@ void IdsReverseProcessor::OnSelectBefore(Context* ctx) {
 
   selected_text_ = cand->text();
   selected_component_ = genuine ? genuine->text() : cand->text();
+  selected_tail_.clear();
+  if (!selected_is_result_) {
+    const std::string& input = ctx->input();
+    if (cand->end() > 0 && cand->end() < input.size())
+      selected_tail_ = input.substr(cand->end());
+  }
   // 选择期间临时关闭自动上屏，交给 OnSelectAfter 统一处理。
   saved_auto_commit_ = ctx->get_option("_auto_commit");
   if (saved_auto_commit_)
@@ -236,6 +242,8 @@ void IdsReverseProcessor::OnSelectAfter(Context* ctx) {
   if (!has_selection_)
     return;
   has_selection_ = false;
+  std::string tail = std::move(selected_tail_);
+  selected_tail_.clear();
   const bool restore_auto_commit = saved_auto_commit_;
   saved_auto_commit_ = false;
 
@@ -277,7 +285,7 @@ void IdsReverseProcessor::OnSelectAfter(Context* ctx) {
       st.components.push_back(text);
       st.codes.push_back(text);
       SaveHybridState(ctx, st.components, st.codes);
-      ctx->set_input(base + text + "'");
+      ctx->set_input(base + text + "'" + tail);
     }
   }
 
