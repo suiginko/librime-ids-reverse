@@ -1607,7 +1607,7 @@ std::vector<std::string> GetSubtractableParts(
   size_t pos = 0;
   uint32_t target_cp = DecodeNext(target, &pos);
   uint32_t target_id = target_cp != 0 ? store.IdOfCp(target_cp) : kInvalidId;
-  if (target_id != kInvalidId && parts.size() < 8) {
+  if (target_id != kInvalidId && !basics.empty() && parts.size() < 8) {
     hash_set<uint16_t> tier1_sub;
     for (const auto& b : basics) {
       size_t bpos = 0;

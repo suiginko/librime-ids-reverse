@@ -3508,10 +3508,15 @@ function subtractable.collect(store, glyph, basics, intermediates, visiting,
     if not is_root then basics[#basics + 1] = glyph end
     return
   end
-  -- 含笔画的字（如 少 = 小 + 丿）视为可减的基本部件，不再拆成笔画。
+  -- 含笔画的字（如 少 = 小 + 丿）在子层视为基本部件不再拆成笔画；
+  -- 若是根节点自身（如 术 = 木 + 丶、丁 = 一 + 亅），直接保留其顶层叶子。
   for _, leaf in ipairs(leaves) do
     if subtractable.is_stroke_glyph(leaf) then
-      if not is_root then basics[#basics + 1] = glyph end
+      if is_root then
+        for _, dl in ipairs(leaves) do basics[#basics + 1] = dl end
+      else
+        basics[#basics + 1] = glyph
+      end
       return
     end
   end
@@ -3541,11 +3546,11 @@ function subtractable.components(store, components)
   subtractable.collect(store, target, basics, intermediates, visiting, 0, true)
 
   local seen = { [canon(target)] = true }
-  local function add(list)
+  local function add(list, allow_stroke)
     if #parts >= 8 then return end
     for _, part in ipairs(list) do
       if #parts >= 8 then return end
-      if part ~= "" and not subtractable.is_stroke_glyph(part) then
+      if part ~= "" and (allow_stroke or not subtractable.is_stroke_glyph(part)) then
         local key = canon(part)
         if not seen[key] then
           seen[key] = true
@@ -3567,8 +3572,58 @@ function subtractable.components(store, components)
       end
     end
   end
-  add(basics)
-  add(intermediates)
+  add(basics, true)
+  add(intermediates, false)
+
+  -- 第二梯队补充：从 comp_set 补充跨枝复合部件（如 渺->泪、屡->屎），按字频降序。
+  local target_cp = decode_next(target, 0)
+  local target_id = target_cp ~= 0 and store:id_of_cp(target_cp) or INVALID_ID
+  if target_id ~= INVALID_ID and #basics > 0 and #parts < 8 then
+    local tier1_sub = {}
+    for _, b in ipairs(basics) do
+      local bcp = decode_next(b, 0)
+      local bid = bcp ~= 0 and store:id_of_cp(bcp) or INVALID_ID
+      if bid ~= INVALID_ID then
+        for _, st in ipairs(store:comp_set(bid)) do
+          tier1_sub[st] = true
+        end
+      end
+    end
+    local extra = {}
+    for _, tok in ipairs(store:comp_set(target_id)) do
+      if not tier1_sub[tok] then
+        local p = store:token_str_of(tok)
+        local key = canon(p)
+        if p ~= "" and not seen[key] and not subtractable.is_stroke_glyph(p) then
+          local pcp = store:token_cp_of(tok)
+          local pid = pcp ~= 0 and store:id_of_cp(pcp) or INVALID_ID
+          if pid ~= INVALID_ID and #store:leaves(pid) >= 2 then
+            extra[#extra + 1] = { part = p, freq = store:hot_freq(pid) }
+          end
+        end
+      end
+    end
+    table.sort(extra, function(a, b) return a.freq > b.freq end)
+    for i = 1, #extra do
+      if #parts >= 8 then break end
+      local part = extra[i].part
+      local key = canon(part)
+      if not seen[key] then
+        seen[key] = true
+        local captured = false
+        for j = 1, #components - 1 do
+          local comp = components[j]
+          local lead = comp:sub(1, 1)
+          if lead ~= "-" and lead ~= "+" and lead ~= "!"
+              and subtract_character(store, comp, part, 0, false) then
+            captured = true
+            break
+          end
+        end
+        if not captured then parts[#parts + 1] = part end
+      end
+    end
+  end
   return parts
 end
 
@@ -4743,6 +4798,10 @@ local function on_select(ctx, env)
   st.components[#st.components + 1] = component
   st.codes[#st.codes + 1] = component
   save_hybrid_state(ctx, st.components, st.codes)
+  while not ctx.composition:empty()
+        and ctx.composition:back()._end > #base do
+    ctx.composition:pop_back()
+  end
   ctx.input = base .. component .. "'" .. tail
 end
 
