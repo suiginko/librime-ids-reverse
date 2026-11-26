@@ -100,6 +100,24 @@ void AppendRpnOperator(Context* ctx,
     ctx->set_caret_pos(ctx->input().size());
 }
 
+// 退格后让最后一段重新参与翻译。删除状态层时 composition 会保留上一层的
+// 引号段；该段可能仍是 kConfirmed，TranslateSegments 会跳过它，导致状态已
+// 更新但候选不再生成。
+void RetagLastSegmentForTranslation(Context* ctx, const ReverseConfig& config) {
+  while (!ctx->composition().empty() &&
+         ctx->composition().back().start == ctx->composition().back().end) {
+    ctx->composition().pop_back();
+  }
+  if (!ctx->composition().empty()) {
+    Segment& sep = ctx->composition().back();
+    sep.tags.clear();
+    sep.tags.insert(config.hybrid.tag);
+    sep.tags.insert(kResultSegmentTag);
+    sep.status = Segment::kVoid;
+  }
+  ctx->set_input(ctx->input());
+}
+
 // 括号闭合且内部拼音都已消歧后，求值并作为一个部件加入状态。
 bool TryCommitClosedGroup(Context* ctx, const ReverseConfig& config) {
   if (!ctx || !IsReverseActive(ctx, config.hybrid.prefix))
@@ -543,19 +561,7 @@ rime::ProcessResult IdsReverseProcessor::ProcessKeyEvent(
         pending_bytes = 1;
       if (pending_chars == 1 && !st.components.empty()) {
         ctx->PopInput(pending_bytes);
-        while (!ctx->composition().empty() &&
-               ctx->composition().back().start ==
-                   ctx->composition().back().end) {
-          ctx->composition().pop_back();
-        }
-        if (!ctx->composition().empty()) {
-          Segment& sep = ctx->composition().back();
-          sep.tags.clear();
-          sep.tags.insert(config_.hybrid.tag);
-          sep.tags.insert(kResultSegmentTag);
-          sep.status = Segment::kVoid;
-        }
-        ctx->set_input(ctx->input());
+        RetagLastSegmentForTranslation(ctx, config_);
         return rime::kAccepted;
       }
       ctx->PopInput(pending_bytes);
@@ -583,9 +589,8 @@ rime::ProcessResult IdsReverseProcessor::ProcessKeyEvent(
       SaveHybridState(ctx, st.components, st.codes);
       if (!ctx->composition().empty())
         ctx->composition().pop_back();
-      if (!ctx->composition().empty())
-        ctx->composition().back().status = Segment::kGuess;
       ctx->PopInput(code_len + 1);
+      RetagLastSegmentForTranslation(ctx, config_);
     } else {
       ctx->Clear();
     }

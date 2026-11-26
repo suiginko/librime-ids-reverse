@@ -135,6 +135,82 @@ const hash_set<std::string>& AtomicComponents() {
   return kAtomic;
 }
 
+bool IsStrokeGlyph(const std::string& glyph) {
+  if (Utf8Chars(glyph).size() != 1)
+    return false;
+  size_t pos = 0;
+  uint32_t cp = DecodeNext(glyph, &pos);
+  if (cp == 0)
+    return false;
+  // 与 data/generate_data_v4.py 的 STROKE_CHARS 保持一致。
+  static const uint32_t kStrokes[] = {0x4E00, 0x4E28, 0x4E3F, 0x4E36,
+                                      0x4E59, 0x4E85, 0x2E80, 0x2010C};
+  for (uint32_t s : kStrokes) {
+    if (cp == s)
+      return true;
+  }
+  return cp >= 0x31C0 && cp <= 0x31EF;
+}
+
+const hash_set<std::string>& CanonicalAtomicComponents() {
+  static const hash_set<std::string> kSet = [] {
+    hash_set<std::string> set;
+    for (const auto& c : AtomicComponents())
+      set.insert(Canon(c));
+    return set;
+  }();
+  return kSet;
+}
+
+bool IsAtomicGlyph(const std::string& glyph, bool from_leaf) {
+  if (AtomicComponents().count(glyph))
+    return true;
+  // 与 SubtractCharacter 一致：用户给出的顶层字按原始字形判断，保留
+  // 龍 等传统复合字的可拆分性；递归进入叶子后再按归一化字形判断。
+  if (!from_leaf)
+    return false;
+  return CanonicalAtomicComponents().count(Canon(glyph)) != 0;
+}
+
+// 收集减法提示用的基本部件与中间复合部件。基本部件为递归停止处的字形，
+// 中间复合部件为实际继续展开过的字形；两者均保留原始字形。
+void CollectSubtractableParts(IdsStore& store,
+                              const std::string& glyph,
+                              std::vector<std::string>* basics,
+                              std::vector<std::string>* intermediates,
+                              hash_set<std::string>* visiting,
+                              int depth,
+                              bool is_root) {
+  std::string key = Canon(glyph);
+  if (depth > 5 || IsAtomicGlyph(glyph, !is_root) || visiting->count(key)) {
+    if (!is_root)
+      basics->push_back(glyph);
+    return;
+  }
+  std::vector<std::string> leaves =
+      TopLeavesOfComponent(store, glyph, /*preserve_glyph=*/true);
+  if (leaves.size() <= 1) {
+    if (!is_root)
+      basics->push_back(glyph);
+    return;
+  }
+  // 含笔画的字（如 少 = 小 + 丿）视为可减的基本部件，不再继续拆成笔画。
+  for (const auto& leaf : leaves) {
+    if (IsStrokeGlyph(leaf)) {
+      if (!is_root)
+        basics->push_back(glyph);
+      return;
+    }
+  }
+  visiting->insert(key);
+  if (!is_root)
+    intermediates->push_back(glyph);
+  for (const auto& leaf : leaves)
+    CollectSubtractableParts(store, leaf, basics, intermediates, visiting,
+                             depth + 1, /*is_root=*/false);
+  visiting->erase(key);
+}
+
 std::vector<std::string> AtomicDecomposition(
     IdsStore& store,
     const std::string& comp,
@@ -167,6 +243,105 @@ std::vector<std::string> AtomicDecomposition(
   }
   (*cache)[ch] = out;
   return out;
+}
+
+// 查询部件是否参与字形归一（CanonMap 的键或值）。只有这类查询才需要原始
+// 字形优先排序；普通部件查询保持原有结构分排序。
+const hash_set<std::string>& CanonEquivSet() {
+  static const hash_set<std::string> kSet = [] {
+    hash_set<std::string> set;
+    for (const auto& kv : CanonMap()) {
+      set.insert(kv.first);
+      set.insert(kv.second);
+    }
+    return set;
+  }();
+  return kSet;
+}
+
+using LiteralNodeCache = hash_map<uint32_t, std::vector<uint16_t>>;
+
+// 原始字形分解节点：从 LEAVES 的原始 token 出发递归展开，保留每一层的
+// 原始字形。缓存键为 token + 深度，数据只读，可跨查询复用。
+const std::vector<uint16_t>& CollectLiteralTokenNodes(IdsStore& store,
+                                                      uint16_t token,
+                                                      LiteralNodeCache* cache,
+                                                      int depth) {
+  uint32_t key =
+      static_cast<uint32_t>(token) | (static_cast<uint32_t>(depth) << 16);
+  auto hit = cache->find(key);
+  if (hit != cache->end())
+    return hit->second;
+
+  std::vector<uint16_t> nodes;
+  nodes.push_back(token);
+  if (depth <= 2 && !store.IsAtomicToken(store.CanonToken(token))) {
+    uint32_t cp = store.TokenCp(token);
+    uint32_t id = cp ? store.IdOfCp(cp) : kInvalidId;
+    if (id != kInvalidId) {
+      const uint16_t* leaves = nullptr;
+      uint16_t n = 0;
+      store.Leaves(id, &leaves, &n);
+      if (n > 1) {
+        for (uint16_t i = 0; i < n; ++i) {
+          uint16_t child = leaves[i];
+          if (child == token)
+            continue;
+          const std::vector<uint16_t>& sub =
+              CollectLiteralTokenNodes(store, child, cache, depth + 1);
+          nodes.insert(nodes.end(), sub.begin(), sub.end());
+        }
+      }
+    }
+  }
+  auto inserted = cache->emplace(key, std::move(nodes));
+  return inserted.first->second;
+}
+
+struct LiteralQuery {
+  std::map<uint16_t, int> counts;
+  bool needed = false;
+};
+
+void BuildLiteralQuery(IdsStore& store,
+                       const std::vector<std::string>& raw,
+                       LiteralQuery* q) {
+  for (const auto& item : raw) {
+    for (const auto& ch : Utf8Chars(item)) {
+      if (ch.empty())
+        continue;
+      if (ch.size() == 1 && static_cast<unsigned char>(ch[0]) < 0x80)
+        continue;
+      uint16_t t;
+      if (store.FindToken(ch, &t))
+        q->counts[t] += 1;
+      if (CanonEquivSet().count(ch))
+        q->needed = true;
+    }
+  }
+}
+
+int LiteralHits(IdsStore& store,
+                uint32_t id,
+                const LiteralQuery& q,
+                LiteralNodeCache* cache) {
+  const uint16_t* leaves = nullptr;
+  uint16_t n = 0;
+  store.Leaves(id, &leaves, &n);
+  std::map<uint16_t, int> counts;
+  for (uint16_t i = 0; i < n; ++i) {
+    const std::vector<uint16_t>& nodes =
+        CollectLiteralTokenNodes(store, leaves[i], cache, 0);
+    for (uint16_t t : nodes)
+      ++counts[t];
+  }
+  int hits = 0;
+  for (const auto& kv : q.counts) {
+    auto it = counts.find(kv.first);
+    if (it != counts.end())
+      hits += std::min(kv.second, it->second);
+  }
+  return hits;
 }
 
 // ---------------------------------------------------------------------------
@@ -640,14 +815,15 @@ std::vector<uint32_t> RankHybridStrings(
     IdsStore& store,
     std::vector<uint32_t> cands,
     const std::vector<std::string>& normalized,
+    const std::vector<std::string>& raw,
     const hash_set<uint32_t>* exact_ids,
     size_t score_limit) {
   std::map<std::string, int> user_atomics;
   std::vector<std::string> user_atomic_seq;
   hash_map<std::string, std::vector<std::string>> cache;
   std::vector<std::string> norm_input;
-  for (const auto& raw : normalized) {
-    std::string c = Canon(raw);
+  for (const auto& item : normalized) {
+    std::string c = Canon(item);
     norm_input.push_back(c);
     std::vector<std::string> atomics = AtomicDecomposition(store, c, &cache, 0);
     for (const auto& a : atomics) {
@@ -656,10 +832,16 @@ std::vector<uint32_t> RankHybridStrings(
     }
   }
 
+  LiteralQuery literal;
+  BuildLiteralQuery(store, raw, &literal);
+  LiteralNodeCache literal_cache;
+
   size_t limit = std::min<size_t>(cands.size(), score_limit);
   struct Scored {
     uint32_t id;
     int64_t score;
+    int literal;
+    uint32_t freq;
     size_t index;
   };
   std::vector<Scored> scored;
@@ -669,15 +851,18 @@ std::vector<uint32_t> RankHybridStrings(
                                     user_atomic_seq, &cache);
     if (exact_ids && exact_ids->count(cands[i]))
       sc = BoostExactStructureScore(sc);
-    scored.push_back({cands[i], sc, i});
+    int literal_hits =
+        literal.needed ? LiteralHits(store, cands[i], literal, &literal_cache)
+                       : 0;
+    scored.push_back({cands[i], sc, literal_hits, store.Hot(cands[i]).freq, i});
   }
-  std::sort(scored.begin(), scored.end(), [&](const Scored& a, const Scored& b) {
+  std::sort(scored.begin(), scored.end(), [](const Scored& a, const Scored& b) {
+    if (a.literal != b.literal)
+      return a.literal > b.literal;
     if (a.score != b.score)
       return a.score > b.score;
-    uint32_t fa = store.Hot(a.id).freq;
-    uint32_t fb = store.Hot(b.id).freq;
-    if (fa != fb)
-      return fa > fb;
+    if (a.freq != b.freq)
+      return a.freq > b.freq;
     return a.index < b.index;
   });
   std::vector<uint32_t> out;
@@ -692,6 +877,7 @@ std::vector<uint32_t> RankHybridStrings(
 std::vector<uint32_t> RankHybrid(IdsStore& store,
                                  std::vector<uint32_t> cands,
                                  const std::vector<std::string>& normalized,
+                                 const std::vector<std::string>& raw,
                                  const hash_set<uint32_t>* exact_ids,
                                  size_t score_limit) {
   if (cands.size() <= 1 || normalized.empty())
@@ -699,13 +885,19 @@ std::vector<uint32_t> RankHybrid(IdsStore& store,
 
   QueryAtoms q;
   if (!BuildQueryAtoms(store, normalized, &q))
-    return RankHybridStrings(store, std::move(cands), normalized, exact_ids,
-                             score_limit);
+    return RankHybridStrings(store, std::move(cands), normalized, raw,
+                             exact_ids, score_limit);
+
+  LiteralQuery literal;
+  BuildLiteralQuery(store, raw, &literal);
+  LiteralNodeCache literal_cache;
 
   size_t limit = std::min<size_t>(cands.size(), score_limit);
   struct Scored {
     uint32_t id;
     int64_t score;
+    int literal;
+    uint32_t freq;
     size_t index;
   };
   std::vector<Scored> scored;
@@ -714,15 +906,18 @@ std::vector<uint32_t> RankHybrid(IdsStore& store,
     int64_t sc = ScoreHybridTokens(store, cands[i], q);
     if (exact_ids && exact_ids->count(cands[i]))
       sc = BoostExactStructureScore(sc);
-    scored.push_back({cands[i], sc, i});
+    int literal_hits =
+        literal.needed ? LiteralHits(store, cands[i], literal, &literal_cache)
+                       : 0;
+    scored.push_back({cands[i], sc, literal_hits, store.Hot(cands[i]).freq, i});
   }
-  std::sort(scored.begin(), scored.end(), [&](const Scored& a, const Scored& b) {
+  std::sort(scored.begin(), scored.end(), [](const Scored& a, const Scored& b) {
+    if (a.literal != b.literal)
+      return a.literal > b.literal;
     if (a.score != b.score)
       return a.score > b.score;
-    uint32_t fa = store.Hot(a.id).freq;
-    uint32_t fb = store.Hot(b.id).freq;
-    if (fa != fb)
-      return fa > fb;
+    if (a.freq != b.freq)
+      return a.freq > b.freq;
     return a.index < b.index;
   });
   std::vector<uint32_t> out;
@@ -1114,7 +1309,7 @@ std::vector<uint32_t> SearchByLeaves(IdsStore& store,
   size_t score_limit = 500;
   if (!exact_set.empty())
     score_limit = std::min<size_t>(cands.size(), 500 + exact_set.size());
-  cands = RankHybrid(store, std::move(cands), normalized,
+  cands = RankHybrid(store, std::move(cands), normalized, leaves,
                      exact_set.empty() ? nullptr : &exact_set, score_limit);
   if (cands.size() > max_results)
     cands.resize(max_results);
@@ -1318,20 +1513,91 @@ bool EvaluateRpnComponents(IdsStore& store,
   bool result_plus_after_sub = false;
   out->components.clear();
   for (const auto& value : stack) {
-    out->components.insert(out->components.end(), value.components.begin(),
-                           value.components.end());
     global_excludes.insert(global_excludes.end(), value.excludes.begin(),
                            value.excludes.end());
     result_has_sub = result_has_sub || value.has_sub;
     result_plus_after_sub = result_plus_after_sub || value.plus_after_sub;
   }
+
+  // 结尾是减法且栈内仍有多个操作数时，候选显示栈顶（刚算出的差值），
+  // 而不是把互不相容的栈值按“同时包含”求交导致候选为空。
+  const bool last_is_sub = !tokens.empty() && tokens.back() == "-";
+  if (last_is_sub && stack.size() > 1) {
+    const RpnValue& top = stack.back();
+    out->components = top.components;
+    *has_sub = top.has_sub;
+    *pure_sub = top.has_sub && !top.plus_after_sub;
+  } else {
+    for (const auto& value : stack) {
+      out->components.insert(out->components.end(), value.components.begin(),
+                             value.components.end());
+    }
+    *has_sub = result_has_sub;
+    *pure_sub = (stack.size() == 1 && result_has_sub && !result_plus_after_sub);
+  }
   out->excludes = std::move(global_excludes);
-  *has_sub = result_has_sub;
-  *pure_sub = (stack.size() == 1 && result_has_sub && !result_plus_after_sub);
   return true;
 }
 
 }  // namespace
+
+std::vector<std::string> GetSubtractableParts(
+    IdsStore& store,
+    const std::vector<std::string>& components) {
+  std::vector<std::string> parts;
+  if (components.empty())
+    return parts;
+
+  std::string target = components.back();
+  // 负号层/排除层不是可分解的操作数。
+  if (target.empty() || target[0] == '-' || target[0] == '!')
+    return parts;
+  if (target[0] == '+')
+    target.erase(target.begin());
+  if (Utf8Chars(target).size() != 1)
+    return parts;
+
+  std::vector<std::string> basics;
+  std::vector<std::string> intermediates;
+  hash_set<std::string> visiting;
+  CollectSubtractableParts(store, target, &basics, &intermediates, &visiting, 0,
+                           /*is_root=*/true);
+
+  hash_set<std::string> seen;
+  seen.insert(Canon(target));
+  auto add = [&](const std::vector<std::string>& list) {
+    if (parts.size() >= 8)
+      return;
+    for (const auto& part : list) {
+      if (parts.size() >= 8)
+        return;
+      if (part.empty() || IsStrokeGlyph(part))
+        continue;
+      std::string key = Canon(part);
+      if (!seen.insert(key).second)
+        continue;
+      if (!SubtractCharacter(store, target, part, 0))
+        continue;
+      // 若更早的正向操作数已经能减掉该部件，实际会作用到更早部件，跳过，
+      // 避免提示与实际扣减目标不一致。
+      bool captured = false;
+      for (size_t i = 0; i + 1 < components.size(); ++i) {
+        const std::string& comp = components[i];
+        if (comp.empty() || comp[0] == '-' || comp[0] == '+' || comp[0] == '!')
+          continue;
+        if (SubtractCharacter(store, comp, part, 0)) {
+          captured = true;
+          break;
+        }
+      }
+      if (!captured)
+        parts.push_back(part);
+    }
+  };
+  add(basics);
+  add(intermediates);
+  return parts;
+}
 
 std::vector<uint32_t> SearchHybrid(IdsStore& store,
                                    const std::vector<std::string>& components,

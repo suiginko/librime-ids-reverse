@@ -1527,6 +1527,27 @@ void IdsReverseTranslator::BuildComponentCandidates(
   }
 }
 
+void IdsReverseTranslator::BuildSubtractablePartCandidates(
+    IdsStore& store,
+    const std::vector<std::string>& parts,
+    const rime::Segment& segment,
+    rime::FifoTranslation* translation) {
+  hash_set<std::string> seen;
+  for (const auto& part : parts) {
+    if (part.empty() || !seen.insert(part).second)
+      continue;
+    uint32_t cp = CpOf(part);
+    uint32_t id = cp ? store.IdOfCp(cp) : kInvalidId;
+    if (id != kInvalidId && config_.disabled_blocks_enabled &&
+        config_.disabled_blocks.count(static_cast<int>(store.Hot(id).block)))
+      continue;
+    auto cand = rime::New<rime::SimpleCandidate>(
+        "hanzi_component", segment.start, segment.end, part, "可减部件");
+    cand->set_quality(100.0);
+    translation->Append(cand);
+  }
+}
+
 void IdsReverseTranslator::BuildMultiComponentCandidates(
     IdsStore& store,
     const std::vector<std::string>& tokens,
@@ -1803,6 +1824,12 @@ rime::an<rime::Translation> IdsReverseTranslator::QueryHybrid(
                }
                return true;
              })()) {
+    // 减法待选：先把前一个部件中可减的下级部件排在结果候选之前。
+    if (pending == "-" && !IsRpnNotation(config_)) {
+      std::vector<std::string> parts =
+          GetSubtractableParts(store, st.components);
+      BuildSubtractablePartCandidates(store, parts, segment, translation.get());
+    }
     std::vector<std::string> comp_list = st.components;
     if (!pending.empty())
       comp_list.push_back(pending);

@@ -24,6 +24,13 @@ std::vector<uint32_t> SearchHybrid(IdsStore& store,
                                    const rime::hash_set<int>* disabled_blocks,
                                    bool rpn = false);
 
+// O 模式减法待选：返回最后一个已选部件中可被减去的下级部件。
+// 基本部件在前，中间复合部件在后；已去重并按 IDS 展开顺序排列。
+// components 为当前状态中的部件层（可能带前导 - / + / !）。
+std::vector<std::string> GetSubtractableParts(
+    IdsStore& store,
+    const std::vector<std::string>& components);
+
 // pending 编码对应的部件单字候选（自包含，不依赖外部拼音翻译器）。
 // 完整单音节返回全部字符（不按 limit 截断）；前缀匹配仍受 limit 限制。
 std::vector<uint32_t> GetComponentCandidates(IdsStore& store,

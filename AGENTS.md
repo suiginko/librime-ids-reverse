@@ -203,8 +203,11 @@ as a multi-character combo are stored as one layer; Backspace removes
   letters and `-`/`+`/`!` are pushed as input. In `algebra_notation: rpn` mode,
   `-`/`+`/`!` are committed as postfix operator layers instead. Backspace
   reopens a just-closed group (e.g. `O渺-(沙-少)` → `O渺-(沙-少`) so the
-  group can be deleted character by character. `select_notifier` temporarily
-  disables `_auto_commit` and commits result candidates itself.
+  group can be deleted character by character. After deleting a state layer it
+  re-tags the last retained segment as a hybrid result segment and forces a
+  recompose, so the candidate list refreshes instead of going stale.
+  `select_notifier` temporarily disables `_auto_commit` and commits result
+  candidates itself.
 - **Parentheses** are edited incrementally: while `pending` is a single
   `[op]? ( ... )?` expression, selecting a component replaces only the last
   unresolved ASCII pinyin run and does not commit state. When `)` closes the
@@ -216,7 +219,10 @@ as a multi-character combo are stored as one layer; Backspace removes
 - **Translator** (`QueryHybrid`), in order: variant-result stage, variant query,
   single-group editor (component candidates for the last ASCII run), results for
   selected components, pending multi-syllable/multi-character candidates,
-  single-component candidates, raw component expressions.
+  single-component candidates, raw component expressions. With infix pending
+  `-`, subtractable parts of the last component are emitted before the result
+  candidates: basic parts first, then intermediate composites (see
+  `GetSubtractableParts` / `subtractable.components`).
 - **Filter**: drops non-plugin candidates, deduplicates component expressions,
   and scans at most 2000 candidates to avoid walking huge dictionaries.
 - **Search**: `SearchHybrid` applies `-`, `+`/`=`, and `!` algebra with `()`
@@ -224,10 +230,15 @@ as a multi-character combo are stored as one layer; Backspace removes
   matches leaves, then ranks. With `algebra_notation: rpn`, state operator
   layers are evaluated by `EvaluateRpnComponents` instead: operands are pushed
   first, `+`/`-` combine the top two values, and postfix `!` moves the top value
-  to the exclusion list. Exact top-level leaf multiset hits from
+  to the exclusion list. If the final token is `-` and multiple stack values
+  remain, results come from the top value (the just-computed difference) rather
+  than intersecting all remaining values. Exact top-level leaf multiset hits from
   `LEAF_STRUCT` are merged first and scored with the same exact-structure floor
   as I mode. Group parentheses are resolved before state entry, so `SearchHybrid`
-  normally receives only paren-free component strings.
+  normally receives only paren-free component strings. Hybrid ranking keys are
+  literal original-glyph hits, structural score, frequency, then candidate
+  index. Literal hits are computed from raw `LEAVES` tokens recursively and are
+  only evaluated when the query contains a `CanonMap` glyph (key or value).
 - **Group evaluator**: `EvaluateAlgebraExpression` (C++) /
   `evaluate_algebra_expression` (Lua) computes `+`/`-`/`!` and nested
   parentheses over components only, without dictionary lookup. It is used when

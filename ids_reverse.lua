@@ -222,6 +222,13 @@ local CANON_MAP = {
   ["钩"] = "亅", ["鉤"] = "亅", ["亅"] = "亅",
 }
 
+-- 用于判断查询中是否出现归一化字形；只有这类查询才需要原始字形优先排序。
+local CANON_EQUIV = {}
+for k, v in pairs(CANON_MAP) do
+  CANON_EQUIV[k] = true
+  CANON_EQUIV[v] = true
+end
+
 local BLOCK_ALIAS_MAP = {
   ["基本"] = 0, ["基本区"] = 0, ["basic"] = 0, ["base"] = 0, ["cjk"] = 0,
   ["扩a"] = 1, ["exta"] = 1, ["ext-a"] = 1, ["a"] = 1,
@@ -515,6 +522,7 @@ function Store.load(path, custom_path)
   end
 
   self.hot_cache = {}
+  self.literal_token_cache = {}
   self.cold_cache = {}
   self.compset_cache = {}
   self.leaves_cache = {}
@@ -2866,6 +2874,53 @@ local function atomic_decomposition(store, comp, cache, depth)
   return out
 end
 
+-- 原始字形分解节点：从 LEAVES 的原始 token 出发递归展开，保留每一层的
+-- 原始字形，用于“原文精确匹配优先”的同分排序。缓存按 token + 深度保存。
+local function collect_literal_token_nodes(store, token, cache, depth, out)
+  local depth_cache = cache[depth]
+  if not depth_cache then
+    depth_cache = {}
+    cache[depth] = depth_cache
+  end
+  local hit = depth_cache[token]
+  if hit then
+    for _, x in ipairs(hit) do out[#out + 1] = x end
+    return
+  end
+  local nodes = { token }
+  if depth <= 2 and not store:is_atomic_token(store:canon_token(token)) then
+    local cp = store:token_cp_of(token)
+    local id = cp ~= 0 and store:id_of_cp(cp) or INVALID_ID
+    if id ~= INVALID_ID then
+      local leaves = store:leaves(id)
+      if #leaves > 1 then
+        for _, child in ipairs(leaves) do
+          if child ~= token then
+            collect_literal_token_nodes(store, child, cache, depth + 1, nodes)
+          end
+        end
+      end
+    end
+  end
+  depth_cache[token] = nodes
+  for _, x in ipairs(nodes) do out[#out + 1] = x end
+end
+
+local function literal_hits(store, id, q_counts, cache)
+  local nodes = {}
+  for _, token in ipairs(store:leaves(id)) do
+    collect_literal_token_nodes(store, token, cache, 0, nodes)
+  end
+  local counts = {}
+  for _, n in ipairs(nodes) do counts[n] = (counts[n] or 0) + 1 end
+  local hits = 0
+  for q, need in pairs(q_counts) do
+    local have = counts[q] or 0
+    hits = hits + math.min(need, have)
+  end
+  return hits
+end
+
 local function keys_for_term(store, term, count)
   local keys = {}
   local function add_token(t)
@@ -3179,14 +3234,52 @@ local function score_hybrid_strings(store, id, normalized, user_atomics,
   return score
 end
 
-local function rank_hybrid_strings(store, cands, normalized, exact_ids,
+local function build_literal_query(store, raw, normalized)
+  local counts, needed = {}, false
+  for _, r in ipairs(raw or normalized) do
+    for _, ch in ipairs(utf8_chars(r)) do
+      if not is_ascii_alpha_only(ch) then
+        local t = store:find_token(ch)
+        if t ~= nil then counts[t] = (counts[t] or 0) + 1 end
+        if CANON_EQUIV[ch] then needed = true end
+      end
+    end
+  end
+  return counts, needed
+end
+
+local function sort_hybrid_limit(store, cands, scores, lits, limit)
+  local idx = {}
+  local freqs = {}
+  for i = 1, limit do
+    idx[i] = i
+    freqs[i] = store:hot_freq(cands[i])
+  end
+  table.sort(idx, function(a, b)
+    if lits then
+      local la, lb = lits[a], lits[b]
+      if la ~= lb then return la > lb end
+    end
+    local sa, sb = scores[a], scores[b]
+    if sa ~= sb then return sa > sb end
+    local fa, fb = freqs[a], freqs[b]
+    if fa ~= fb then return fa > fb end
+    return a < b
+  end)
+  local out = {}
+  for i = 1, limit do out[i] = cands[idx[i]] end
+  for i = limit + 1, #cands do out[i] = cands[i] end
+  return out
+end
+
+local function rank_hybrid_strings(store, cands, normalized, raw, exact_ids,
                                    score_limit)
   local user_atomics = {}
   local user_atomic_seq = {}
   local cache = {}
   local norm_input = {}
-  for _, raw in ipairs(normalized) do
-    local c = canon(raw)
+  for _, item in ipairs(normalized) do
+    local c = canon(item)
     norm_input[#norm_input + 1] = c
     local atomics = atomic_decomposition(store, c, cache, 0)
     for _, a in ipairs(atomics) do
@@ -3196,7 +3289,10 @@ local function rank_hybrid_strings(store, cands, normalized, exact_ids,
   end
 
   local limit = math.min(#cands, score_limit or 500)
+  local q_counts, needs_literal = build_literal_query(store, raw, normalized)
+  local lit_cache = store.literal_token_cache
   local scores = {}
+  local lits = needs_literal and {} or nil
   for i = 1, limit do
     local id = cands[i]
     local sc = score_hybrid_strings(store, id, norm_input, user_atomics,
@@ -3205,20 +3301,24 @@ local function rank_hybrid_strings(store, cands, normalized, exact_ids,
       sc = boost_exact_structure(sc)
     end
     scores[i] = sc
+    if lits then lits[i] = literal_hits(store, id, q_counts, lit_cache) end
   end
-  local out = top_k_ids(cands, scores, limit, limit)
-  for i = limit + 1, #cands do out[#out + 1] = cands[i] end
-  return out
+  return sort_hybrid_limit(store, cands, scores, lits, limit)
 end
 
-local function rank_hybrid(store, cands, normalized, exact_ids, score_limit)
+local function rank_hybrid(store, cands, normalized, raw, exact_ids,
+                           score_limit)
   if #cands <= 1 or #normalized == 0 then return cands end
   local q = build_query_atoms(store, normalized)
   if not q then
-    return rank_hybrid_strings(store, cands, normalized, exact_ids, score_limit)
+    return rank_hybrid_strings(store, cands, normalized, raw, exact_ids,
+                               score_limit)
   end
   local limit = math.min(#cands, score_limit or 500)
+  local q_counts, needs_literal = build_literal_query(store, raw, normalized)
+  local lit_cache = store.literal_token_cache
   local scores = {}
+  local lits = needs_literal and {} or nil
   for i = 1, limit do
     local id = cands[i]
     local sc = score_hybrid_tokens(store, id, q)
@@ -3226,10 +3326,9 @@ local function rank_hybrid(store, cands, normalized, exact_ids, score_limit)
       sc = boost_exact_structure(sc)
     end
     scores[i] = sc
+    if lits then lits[i] = literal_hits(store, id, q_counts, lit_cache) end
   end
-  local out = top_k_ids(cands, scores, limit, limit)
-  for i = limit + 1, #cands do out[#out + 1] = cands[i] end
-  return out
+  return sort_hybrid_limit(store, cands, scores, lits, limit)
 end
 
 local function normalize_algebra_item(store, raw, codec)
@@ -3359,6 +3458,118 @@ local function apply_single_subtraction(store, current, neg)
     end
   end
   return current
+end
+
+-- ---------------------------------------------------------------------------
+-- 减法待选：从最后一个已选部件中提取可减的下级部件
+-- ---------------------------------------------------------------------------
+
+local subtractable = {
+  STROKE_GLYPHS = {
+    ["一"] = true, ["丨"] = true, ["丿"] = true, ["丶"] = true,
+    ["乙"] = true, ["亅"] = true, ["⺀"] = true, ["𠄌"] = true,
+  },
+}
+
+function subtractable.is_stroke_glyph(glyph)
+  local chars = utf8_chars(glyph)
+  if #chars ~= 1 then return false end
+  local cp = decode_next(glyph, 0)
+  if cp == 0 then return false end
+  if subtractable.STROKE_GLYPHS[chars[1]] then return true end
+  return cp >= 0x31C0 and cp <= 0x31EF
+end
+
+function subtractable.is_atomic_glyph(glyph, from_leaf)
+  if ATOMIC_COMPONENTS[glyph] then return true end
+  -- 与 subtract_character 一致：顶层字按原始字形判断，递归叶子才用归一化字形。
+  if not from_leaf then return false end
+  local ch = canon(glyph)
+  if ATOMIC_COMPONENTS[ch] then return true end
+  if not subtractable.canonical_atomic then
+    subtractable.canonical_atomic = {}
+    for component in pairs(ATOMIC_COMPONENTS) do
+      subtractable.canonical_atomic[canon(component)] = true
+    end
+  end
+  return subtractable.canonical_atomic[ch] == true
+end
+
+function subtractable.collect(store, glyph, basics, intermediates, visiting,
+                              depth, is_root)
+  local key = canon(glyph)
+  if depth > 5 or subtractable.is_atomic_glyph(glyph, not is_root)
+      or visiting[key] then
+    if not is_root then basics[#basics + 1] = glyph end
+    return
+  end
+  local leaves = top_leaves_of_component(store, glyph, true)
+  if #leaves <= 1 then
+    if not is_root then basics[#basics + 1] = glyph end
+    return
+  end
+  -- 含笔画的字（如 少 = 小 + 丿）视为可减的基本部件，不再拆成笔画。
+  for _, leaf in ipairs(leaves) do
+    if subtractable.is_stroke_glyph(leaf) then
+      if not is_root then basics[#basics + 1] = glyph end
+      return
+    end
+  end
+  visiting[key] = true
+  if not is_root then intermediates[#intermediates + 1] = glyph end
+  for _, leaf in ipairs(leaves) do
+    subtractable.collect(store, leaf, basics, intermediates, visiting,
+                         depth + 1, false)
+  end
+  visiting[key] = nil
+end
+
+function subtractable.components(store, components)
+  local parts = {}
+  if not components or #components == 0 then return parts end
+
+  local target = components[#components]
+  if target == "" then return parts end
+  local first = target:sub(1, 1)
+  -- 负号层/排除层不是可分解的操作数。
+  if first == "-" or first == "!" then return parts end
+  if first == "+" then target = target:sub(2) end
+  if utf8_length(target) ~= 1 then return parts end
+
+  local basics, intermediates = {}, {}
+  local visiting = {}
+  subtractable.collect(store, target, basics, intermediates, visiting, 0, true)
+
+  local seen = { [canon(target)] = true }
+  local function add(list)
+    if #parts >= 8 then return end
+    for _, part in ipairs(list) do
+      if #parts >= 8 then return end
+      if part ~= "" and not subtractable.is_stroke_glyph(part) then
+        local key = canon(part)
+        if not seen[key] then
+          seen[key] = true
+          -- 必须在目标字上确实可减，且不会被更早的正向操作数先减掉。
+          if subtract_character(store, target, part, 0, false) then
+            local captured = false
+            for i = 1, #components - 1 do
+              local comp = components[i]
+              local lead = comp:sub(1, 1)
+              if lead ~= "-" and lead ~= "+" and lead ~= "!"
+                  and subtract_character(store, comp, part, 0, false) then
+                captured = true
+                break
+              end
+            end
+            if not captured then parts[#parts + 1] = part end
+          end
+        end
+      end
+    end
+  end
+  add(basics)
+  add(intermediates)
+  return parts
 end
 
 -- ---------------------------------------------------------------------------
@@ -3588,21 +3799,35 @@ function M._rpn.evaluate(store, components, codec)
     end
   end
 
-  local result_components = {}
   local result_has_sub = false
   local result_plus_after_sub = false
+  local result_components = {}
   for _, value in ipairs(stack) do
-    for _, c in ipairs(value.components) do
-      result_components[#result_components + 1] = c
-    end
     for _, e in ipairs(value.excludes) do
       excludes[#excludes + 1] = e
     end
     result_has_sub = result_has_sub or value.has_sub
     result_plus_after_sub = result_plus_after_sub or value.plus_after_sub
   end
-  local pure_sub = #stack == 1 and result_has_sub
-                   and not result_plus_after_sub
+
+  -- 结尾是减法且栈内仍有多个操作数时，候选显示栈顶（刚算出的差值），
+  -- 而不是把互不相容的栈值按“同时包含”求交导致候选为空。
+  local pure_sub
+  local last_is_sub = #components > 0 and components[#components] == "-"
+  if last_is_sub and #stack > 1 then
+    local top = stack[#stack]
+    result_components = top.components
+    result_has_sub = top.has_sub
+    pure_sub = top.has_sub and not top.plus_after_sub
+  else
+    for _, value in ipairs(stack) do
+      for _, c in ipairs(value.components) do
+        result_components[#result_components + 1] = c
+      end
+    end
+    pure_sub = #stack == 1 and result_has_sub
+               and not result_plus_after_sub
+  end
   return result_components, excludes, pure_sub, result_has_sub
 end
 
@@ -3785,7 +4010,7 @@ local function search_by_leaves(store, leaves, codec, max_results,
   if exact_count > 0 then
     score_limit = math.min(#cands, 500 + exact_count)
   end
-  cands = rank_hybrid(store, cands, normalized,
+  cands = rank_hybrid(store, cands, normalized, leaves,
                       exact_count > 0 and exact_set or nil, score_limit)
   if #cands > max_results then
     local r = {}
@@ -4188,6 +4413,22 @@ local function save_hybrid_state(ctx, components, codes)
     out[#out + 1] = components[i] .. "\t" .. codes[i] .. "\n"
   end
   ctx:set_property(HYBRID_STATE_PROPERTY, table.concat(out))
+end
+
+-- 退格后让最后一段重新参与翻译。删除状态层时 composition 会保留上一层的
+-- 引号段；该段可能仍是 kConfirmed，TranslateSegments 会跳过它，导致状态已
+-- 更新但候选不再生成。
+local function retag_last_segment(ctx, env)
+  while not ctx.composition:empty()
+        and ctx.composition:back().start == ctx.composition:back()._end do
+    ctx.composition:pop_back()
+  end
+  if not ctx.composition:empty() then
+    local sep = ctx.composition:back()
+    sep.tags = Set({ env.config.hybrid.tag, RESULT_SEGMENT_TAG })
+    sep.status = "kVoid"
+  end
+  ctx.input = ctx.input
 end
 
 local function has_variants(text)
@@ -4618,16 +4859,7 @@ local function processor_func(key_event, env)
       if pending_bytes == 0 then pending_bytes = 1 end
       if pending_chars == 1 and #st.components > 0 then
         ctx:pop_input(pending_bytes)
-        while not ctx.composition:empty()
-              and ctx.composition:back().start == ctx.composition:back()._end do
-          ctx.composition:pop_back()
-        end
-        if not ctx.composition:empty() then
-          local sep = ctx.composition:back()
-          sep.tags = Set({ env.config.hybrid.tag, RESULT_SEGMENT_TAG })
-          sep.status = "kVoid"
-        end
-        ctx.input = ctx.input
+        retag_last_segment(ctx, env)
         return 1
       end
       ctx:pop_input(pending_bytes)
@@ -4654,10 +4886,8 @@ local function processor_func(key_event, env)
       st.codes[#st.codes] = nil
       save_hybrid_state(ctx, st.components, st.codes)
       if not ctx.composition:empty() then ctx.composition:pop_back() end
-      if not ctx.composition:empty() then
-        ctx.composition:back().status = "kGuess"
-      end
       ctx:pop_input(code_len + 1)
+      retag_last_segment(ctx, env)
     else
       leave_o_mode(ctx)
       ctx:clear()
@@ -4991,6 +5221,21 @@ local function build_component_candidates(store, results, segment, config)
   end
 end
 
+function subtractable.build_candidates(store, parts, segment, config)
+  for _, text in ipairs(parts) do
+    local cp = decode_next(text, 0)
+    local id = cp ~= 0 and store:id_of_cp(cp) or INVALID_ID
+    if id == INVALID_ID
+        or not (config.disabled_blocks_enabled
+                and config.disabled_blocks[store:hot_block(id)]) then
+      local cand = Candidate("hanzi_component", segment.start, segment._end,
+                             text, "可减部件")
+      cand.quality = 100.0
+      yield(cand)
+    end
+  end
+end
+
 local function build_multi_component_candidates(store, tokens, segment, config,
                                                 ctx)
   local per_token_limit = 4
@@ -5257,6 +5502,13 @@ local function query_hybrid(segment, env)
   end
 
   if (pending == "" or is_operator_only) and #st.components > 0 then
+    -- 减法待选：先把前一个部件中可减的下级部件排在结果候选之前。
+    if pending == "-" and env.config.algebra_notation ~= "rpn" then
+      local parts = subtractable.components(store, st.components)
+      if #parts > 0 then
+        subtractable.build_candidates(store, parts, segment, env.config)
+      end
+    end
     local comp_list = {}
     for _, comp in ipairs(st.components) do comp_list[#comp_list + 1] = comp end
     if pending ~= "" then comp_list[#comp_list + 1] = pending end
@@ -5421,6 +5673,7 @@ M._internal = {
   format_group_component = format_group_component,
   is_component_expression = is_component_expression,
   build_multi_component_candidates = build_multi_component_candidates,
+  subtractable_components = subtractable.components,
   build_variant_candidates = build_variant_candidates,
   clear_query_caches = clear_query_caches,
   load_config = load_config,

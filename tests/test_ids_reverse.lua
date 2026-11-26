@@ -199,6 +199,35 @@ ok(o_le_pos ~= nil and o_le_pos <= 3, "O 了 优先展示 𠄏")
 local o_bi = hybrid({ "匕匕" })
 ok(contains(chars(o_bi), "𫧇"), "O 匕匕 包含 𫧇")
 
+-- 原始字形优先：同结构下先显示原文精确匹配，字频仅作最后兜底。
+local o_miao = hybrid({ "纟", "目", "少" })
+local o_miao_sim = index_of(o_miao, "缈")
+local o_miao_trad = index_of(o_miao, "緲")
+ok(o_miao_sim ~= nil and utf8.char(store:cp_of_id(o_miao[1])) == "缈",
+   "O 纟目少 首选 缈")
+ok(o_miao_sim ~= nil and o_miao_trad ~= nil and o_miao_sim < o_miao_trad,
+   "O 纟目少 缈 在 緲 前")
+
+local o_xiang = hybrid({ "纟", "目" })
+ok(utf8.char(store:cp_of_id(o_xiang[1])) == "缃", "O 纟目 首选 缃")
+
+local o_sha = hybrid({ "纟", "少" })
+ok(utf8.char(store:cp_of_id(o_sha[1])) == "纱", "O 纟少 首选 纱")
+
+local o_long = hybrid({ "龙" })
+local o_long_pos = index_of(o_long, "拢")
+local o_long_trad = index_of(o_long, "龍")
+ok(o_long_pos ~= nil and
+   (o_long_trad == nil or o_long_pos < o_long_trad),
+   "O 龙 优先原始字形 拢")
+
+local o_yan = hybrid({ "讠" })
+local o_yan_pos = index_of(o_yan, "计")
+local o_yan_trad = index_of(o_yan, "訁")
+ok(o_yan_pos ~= nil and
+   (o_yan_trad == nil or o_yan_pos < o_yan_trad),
+   "O 讠 优先原始字形 计")
+
 local sen_minus = hybrid({ "森", "-木" })
 ok(utf8.char(store:cp_of_id(sen_minus[1])) == "林", "O 森-木 首选 林")
 
@@ -217,6 +246,20 @@ ok(utf8.char(store:cp_of_id(chun[1])) == "𡗗", "O 春-日 首选 𡗗")
 
 local pei = hybrid({ "佩", "-亻" })
 ok(utf8.char(store:cp_of_id(pei[1])) == "𫥞", "O 佩-亻 首选 𫥞")
+
+-- 减法待选：先列基本部件，再列中间复合部件。
+local function subtractable(components)
+  return table.concat(I.subtractable_components(store, components))
+end
+ok(subtractable({ "渺" }) == "氵目少眇", "O 渺- 提示 氵目少眇")
+ok(subtractable({ "眇" }) == "目少", "O 眇- 提示 目少")
+ok(subtractable({ "森" }) == "木林", "O 森- 提示 木林")
+ok(subtractable({ "春" }) == "人三日𡗗", "O 春- 提示 人三日𡗗")
+ok(subtractable({ "木" }) == "", "O 木- 无额外提示")
+ok(subtractable({ "少" }) == "", "O 少- 不拆成笔画")
+ok(subtractable({ "森", "-木" }) == "", "负操作数不提示可减部件")
+local miao_minus_water = hybrid({ "渺", "-氵" })
+ok(utf8.char(store:cp_of_id(miao_minus_water[1])) == "眇", "O 渺-氵 首选 眇")
 
 -- 括号分组：外层运算符作用于组内所有部件
 local miao_group = hybrid({ "渺", "-(水少)" })
@@ -243,6 +286,17 @@ local rpn_zhang = rpn({ "章", "日", "-", "十", "-" })
 ok(utf8.char(store:cp_of_id(rpn_zhang[1])) == "立", "RPN 章日-十- 首选 立")
 local rpn_da = rpn({ "达", "大", "-" })
 ok(utf8.char(store:cp_of_id(rpn_da[1])) == "辶", "RPN 达大- 首选 辶")
+-- 结尾减法且栈内仍有多个操作数时，显示栈顶的中间结果。
+local rpn_partial_sub = rpn({ "渺", "沙", "少", "-" })
+ok(#rpn_partial_sub > 0, "RPN 渺沙少- 不消失")
+ok(utf8.char(store:cp_of_id(rpn_partial_sub[1])) == "氵",
+   "RPN 渺沙少- 首选 氵")
+local rpn_full_sub = rpn({ "渺", "沙", "少", "-", "-" })
+ok(utf8.char(store:cp_of_id(rpn_full_sub[1])) == "眇",
+   "RPN 渺沙少-- 首选 眇")
+local rpn_two_operands = rpn({ "木", "木" })
+ok(utf8.char(store:cp_of_id(rpn_two_operands[1])) == "林",
+   "RPN 木木 仍按同时包含")
 local rpn_excluded = chars(rpn({ "木", "木", "口", "!" }))
 ok(not contains(rpn_excluded, "啉"), "RPN 木木口! 排除 啉")
 local rpn_grouped_excluded = chars(rpn({ "木", "木", "口", "日", "+", "!" }))
