@@ -621,8 +621,9 @@ function Store:leaves(id)
   if id >= self.num_chars then return {} end
   local hit = self.leaves_cache[id]
   if hit then return hit end
-  local h = self:hot(id)
-  local out = read_token_array(self.blob, self.leaves_off + h.leaf_off)
+  local h = self.hot_cache[id]
+  local leaf_off = h and h.leaf_off or rd32(self.blob, self.hot_off + id * 24 + 16)
+  local out = read_token_array(self.blob, self.leaves_off + leaf_off)
   self.leaves_cache[id] = out
   return out
 end
@@ -664,8 +665,9 @@ function Store:atomics(id)
   if id >= self.num_chars then return {} end
   local hit = self.atoms_cache[id]
   if hit then return hit end
-  local h = self:hot(id)
-  local out = read_token_array(self.blob, self.atoms_off + h.atom_off)
+  local h = self.hot_cache[id]
+  local atom_off = h and h.atom_off or rd32(self.blob, self.hot_off + id * 24 + 20)
+  local out = read_token_array(self.blob, self.atoms_off + atom_off)
   self.atoms_cache[id] = out
   return out
 end
@@ -3027,49 +3029,46 @@ end
 local function score_hybrid_tokens(store, id, q)
   local leaves = store:leaves(id)
   local atoms = store:atomics(id)
+  local n_atoms = #atoms
   local satisfied = true
   local missing_count = 0
-  for _, c in ipairs(q.counts) do
+  local matched_sum = 0
+  local q_counts = q.counts
+  for j = 1, #q_counts do
+    local c = q_counts[j]
+    local tok, req = c.token, c.count
     local avail = 0
-    for _, atom in ipairs(atoms) do
-      if atom == c.token then avail = avail + 1 end
+    for i = 1, n_atoms do
+      if atoms[i] == tok then avail = avail + 1 end
     end
-    if avail < c.count then
+    if avail < req then
       satisfied = false
-      missing_count = missing_count + c.count - avail
+      missing_count = missing_count + req - avail
+      matched_sum = matched_sum + avail
+    else
+      matched_sum = matched_sum + req
     end
   end
 
-  local extra_count = 0
-  local seen_tok = {}
-  for _, t in ipairs(atoms) do
-    if not seen_tok[t] then
-      seen_tok[t] = true
-      local avail = 0
-      for _, atom in ipairs(atoms) do
-        if atom == t then avail = avail + 1 end
-      end
-      local req = token_count_of(q.counts, t)
-      if avail > req then extra_count = extra_count + avail - req end
-    end
-  end
+  local extra_count = n_atoms - matched_sum
 
   local ordered_bonus = 0
-  local match_macro = #leaves == #q.norm
+  local q_norm = q.norm
+  local n_norm = #q_norm
+  local match_macro = #leaves == n_norm
   if match_macro then
-    for i = 1, #q.norm do
-      if store:canon_token(leaves[i]) ~= q.norm[i] then
+    for i = 1, n_norm do
+      if store:canon_token(leaves[i]) ~= q_norm[i] then
         match_macro = false
         break
       end
     end
   end
   local match_macro_rev = false
-  if not match_macro and #leaves == #q.norm then
+  if not match_macro and #leaves == n_norm then
     match_macro_rev = true
-    local n = #q.norm
-    for i = 1, n do
-      if store:canon_token(leaves[i]) ~= q.norm[n - i + 1] then
+    for i = 1, n_norm do
+      if store:canon_token(leaves[i]) ~= q_norm[n_norm - i + 1] then
         match_macro_rev = false
         break
       end
@@ -3079,10 +3078,11 @@ local function score_hybrid_tokens(store, id, q)
     ordered_bonus = 20000000
   elseif match_macro_rev then
     ordered_bonus = 10000000
-  elseif #q.seq == #atoms then
+  elseif #q.seq == n_atoms then
+    local q_seq = q.seq
     local seq_match = true
-    for i = 1, #q.seq do
-      if q.seq[i] ~= atoms[i] then seq_match = false; break end
+    for i = 1, n_atoms do
+      if q_seq[i] ~= atoms[i] then seq_match = false; break end
     end
     if seq_match then ordered_bonus = 15000000 end
   end
@@ -4981,7 +4981,7 @@ end
 local function build_component_candidates(store, results, segment, config)
   for _, id in ipairs(results) do
     if not (config.disabled_blocks_enabled
-            and config.disabled_blocks[store:hot(id).block]) then
+            and config.disabled_blocks[store:hot_block(id)]) then
       local text = cp_to_utf8(store:cp_of_id(id))
       local cand = Candidate("hanzi_component", segment.start, segment._end,
                              text, "")
@@ -5005,8 +5005,8 @@ local function build_multi_component_candidates(store, tokens, segment, config,
       local cp = decode_next(token, 0)
       local id = cp ~= 0 and store:id_of_cp(cp) or INVALID_ID
       if id == INVALID_ID then return end
-      if disabled and disabled[store:hot(id).block] then return end
-      opts[1] = { text = token, rank = 0, freq = store:hot(id).freq }
+      if disabled and disabled[store:hot_block(id)] then return end
+      opts[1] = { text = token, rank = 0, freq = store:hot_freq(id) }
     elseif store.valid_pinyins[token] then
       -- Segment 解码出的标准拼音（不再当作输入码处理）。
       local ids = get_pinyin_candidates(store, token, 80)
