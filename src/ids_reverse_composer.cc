@@ -285,6 +285,10 @@ void IdsReverseProcessor::OnSelectAfter(Context* ctx) {
       st.components.push_back(text);
       st.codes.push_back(text);
       SaveHybridState(ctx, st.components, st.codes);
+      Composition& comp = ctx->composition();
+      while (!comp.empty() && comp.back().end > base.size()) {
+        comp.pop_back();
+      }
       ctx->set_input(base + text + "'" + tail);
     }
   }
