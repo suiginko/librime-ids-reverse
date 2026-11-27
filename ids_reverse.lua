@@ -2777,18 +2777,18 @@ local ATOMIC_COMPONENTS = {
   ["十"] = true, ["大"] = true, ["小"] = true, ["工"] = true, ["弓"] = true,
   ["广"] = true, ["门"] = true, ["马"] = true, ["鸟"] = true, ["鱼"] = true,
   ["虫"] = true, ["犭"] = true, ["犬"] = true, ["辶"] = true, ["宀"] = true,
-  ["冖"] = true, ["穴"] = true, ["竹"] = true, ["⺮"] = true, ["米"] = true,
+  ["冖"] = true, ["竹"] = true, ["⺮"] = true, ["米"] = true,
   ["糸"] = true, ["纟"] = true, ["车"] = true, ["足"] = true, ["⻊"] = true,
   ["雨"] = true, ["页"] = true, ["酉"] = true, ["贝"] = true, ["走"] = true,
-  ["身"] = true, ["辛"] = true, ["辰"] = true, ["邑"] = true, ["阝"] = true,
+  ["身"] = true, ["辰"] = true, ["阝"] = true,
   ["阜"] = true, ["方"] = true, ["斤"] = true, ["止"] = true, ["歹"] = true,
-  ["殳"] = true, ["毛"] = true, ["氏"] = true, ["气"] = true, ["白"] = true,
+  ["毛"] = true, ["氏"] = true, ["气"] = true, ["白"] = true,
   ["皮"] = true, ["皿"] = true, ["矢"] = true, ["示"] = true, ["礻"] = true,
-  ["禾"] = true, ["立"] = true, ["羽"] = true, ["舟"] = true, ["艮"] = true,
-  ["见"] = true, ["角"] = true, ["谷"] = true, ["豆"] = true, ["豕"] = true,
-  ["豸"] = true, ["赤"] = true, ["革"] = true, ["音"] = true, ["风"] = true,
-  ["飞"] = true, ["食"] = true, ["饣"] = true, ["首"] = true, ["香"] = true,
-  ["骨"] = true, ["鬼"] = true, ["黾"] = true, ["鼎"] = true, ["鼓"] = true,
+  ["禾"] = true, ["立"] = true, ["舟"] = true, ["艮"] = true,
+  ["见"] = true, ["角"] = true, ["豆"] = true, ["豕"] = true,
+  ["豸"] = true, ["赤"] = true, ["革"] = true, ["风"] = true,
+  ["飞"] = true, ["饣"] = true, ["首"] = true,
+  ["骨"] = true, ["鬼"] = true, ["鼎"] = true, ["鼓"] = true,
   ["鼠"] = true, ["鼻"] = true, ["齐"] = true, ["齿"] = true, ["龙"] = true,
   ["龟"] = true,
   ["⺡"] = true, ["⺣"] = true, ["⺅"] = true, ["龵"] = true, ["⺖"] = true,
@@ -3703,6 +3703,15 @@ local function search_by_leaves(store, leaves, codec, max_results,
     cands = filtered
   end
   cands = remove_excluded(store, exclude_entries, cands)
+  if #order >= 2 and #cands > 500 then
+    local freqs = {}
+    for i = 1, #cands do freqs[cands[i]] = store:hot_freq(cands[i]) end
+    table.sort(cands, function(a, b)
+      local fa, fb = freqs[a], freqs[b]
+      if fa ~= fb then return fa > fb end
+      return a < b
+    end)
+  end
 
   local exact = lookup_exact_structure(store, normalized, disabled_blocks)
   exact = remove_excluded(store, exclude_entries, exact)
