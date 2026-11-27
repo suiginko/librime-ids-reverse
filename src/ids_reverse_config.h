@@ -33,8 +33,6 @@ struct ReverseConfig {
   // 输入编码使用 Rime 拼写代数（spelling algebra）规则。
   // 留空表示无规则：输入码就是全拼本身。
   std::vector<std::string> algebra;
-  // O 模式部件代数表示法：infix（中缀，默认）或 rpn（逆波兰后缀）。
-  std::string algebra_notation = "infix";
   std::string ids_format = "unicode";
   std::string variant_trigger = "/";
   std::string variant_replace_key = "Shift+V";
@@ -50,10 +48,6 @@ struct ReverseConfig {
   rime::hash_set<int> disabled_blocks;
   bool disabled_blocks_enabled = false;
 };
-
-inline bool IsRpnNotation(const ReverseConfig& config) {
-  return config.algebra_notation == "rpn";
-}
 
 // 混合检字过程中保存在 Context property 中的状态。
 constexpr char kHybridStateProperty[] = "ids_reverse_components";

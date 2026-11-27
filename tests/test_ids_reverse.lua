@@ -158,9 +158,6 @@ end
 local function hybrid(components, codec)
   return I.search_hybrid(store, components, codec or full, 60, nil)
 end
-local function rpn(components, codec)
-  return I.search_hybrid(store, components, codec or full, 60, nil, "rpn")
-end
 
 local wood_mouth = chars(search("木口"))
 ok(contains(wood_mouth, "杏"), "I 木口 包含 杏")
@@ -228,146 +225,84 @@ ok(o_yan_pos ~= nil and
    (o_yan_trad == nil or o_yan_pos < o_yan_trad),
    "O 讠 优先原始字形 计")
 
-local sen_minus = hybrid({ "森", "-木" })
-ok(utf8.char(store:cp_of_id(sen_minus[1])) == "林", "O 森-木 首选 林")
-
-local da_minus = hybrid({ "达", "-大" })
-ok(utf8.char(store:cp_of_id(da_minus[1])) == "辶", "O 达-大 首选 辶")
-
-local excluded = chars(hybrid({ "木木", "!口" }))
-ok(not contains(excluded, "啉"), "O 木木!口 排除 啉")
-ok(#hybrid({ "木木", "!木" }) == 0, "O 木木!木 结果为空")
-
-local zhang = hybrid({ "章", "-日十" })
-ok(utf8.char(store:cp_of_id(zhang[1])) == "立", "O 章-日十 首选 立")
-
-local chun = hybrid({ "春", "-日" })
-ok(utf8.char(store:cp_of_id(chun[1])) == "𡗗", "O 春-日 首选 𡗗")
-
-local pei = hybrid({ "佩", "-亻" })
-ok(utf8.char(store:cp_of_id(pei[1])) == "𫥞", "O 佩-亻 首选 𫥞")
-
--- 减法待选：先列基本部件，再列中间复合部件。
-local function subtractable(components)
-  return table.concat(I.subtractable_components(store, components))
-end
-ok(subtractable({ "渺" }) == "氵目少眇", "O 渺- 提示 氵目少眇")
-ok(subtractable({ "眇" }) == "目少", "O 眇- 提示 目少")
-ok(subtractable({ "森" }) == "木林", "O 森- 提示 木林")
-ok(subtractable({ "春" }) == "人三日𡗗", "O 春- 提示 人三日𡗗")
-ok(subtractable({ "木" }) == "", "O 木- 无额外提示")
-ok(subtractable({ "少" }) == "", "O 少- 不拆成笔画")
-ok(subtractable({ "森", "-木" }) == "", "负操作数不提示可减部件")
-local miao_minus_water = hybrid({ "渺", "-氵" })
-ok(utf8.char(store:cp_of_id(miao_minus_water[1])) == "眇", "O 渺-氵 首选 眇")
-
--- 括号分组：外层运算符作用于组内所有部件
-local miao_group = hybrid({ "渺", "-(水少)" })
-ok(utf8.char(store:cp_of_id(miao_group[1])) == "目", "O 渺-(水少) 首选 目")
-local miao_group_raw = hybrid({ "渺-(水少)" })
-ok(utf8.char(store:cp_of_id(miao_group_raw[1])) == "目",
-   "O 渺-(水少) 表达式首选 目")
-
-local sen_group = hybrid({ "森", "-(木木)" })
-ok(utf8.char(store:cp_of_id(sen_group[1])) == "木", "O 森-(木木) 首选 木")
-
-local grouped_excluded = chars(hybrid({ "木木", "!(口日)" }))
-ok(not contains(grouped_excluded, "啉"), "O 木木!(口日) 排除 啉")
-ok(not contains(grouped_excluded, "晽"), "O 木木!(口日) 排除 晽")
-
 -- 逆波兰后缀表达式
-local rpn_add = rpn({ "木", "木", "+" })
+local sen_minus = hybrid({ "森", "木", "-" })
+ok(utf8.char(store:cp_of_id(sen_minus[1])) == "林", "O 森木- 首选 林")
+
+local da_minus = hybrid({ "达", "大", "-" })
+ok(utf8.char(store:cp_of_id(da_minus[1])) == "辶", "O 达大- 首选 辶")
+
+local excluded = chars(hybrid({ "木木", "口", "!" }))
+ok(not contains(excluded, "啉"), "O 木木口! 排除 啉")
+ok(#hybrid({ "木木", "木", "!" }) == 0, "O 木木木! 结果为空")
+
+local zhang = hybrid({ "章", "日", "-", "十", "-" })
+ok(utf8.char(store:cp_of_id(zhang[1])) == "立", "O 章日-十- 首选 立")
+
+local chun = hybrid({ "春", "日", "-" })
+ok(utf8.char(store:cp_of_id(chun[1])) == "𡗗", "O 春日- 首选 𡗗")
+
+local pei = hybrid({ "佩", "亻", "-" })
+ok(utf8.char(store:cp_of_id(pei[1])) == "𫥞", "O 佩亻- 首选 𫥞")
+
+local miao_minus_water = hybrid({ "渺", "氵", "-" })
+ok(utf8.char(store:cp_of_id(miao_minus_water[1])) == "眇", "O 渺氵- 首选 眇")
+
+-- 一个状态层是同一个操作数：汉字串展开后作为整体参与后续运算。
+local multi_operand = hybrid({ "章", "日十", "-" })
+ok(utf8.char(store:cp_of_id(multi_operand[1])) == "立",
+   "O 章 日十 - 首选 立")
+
+local miao_group = hybrid({ "渺", "水", "少", "+", "-" })
+ok(utf8.char(store:cp_of_id(miao_group[1])) == "目", "O 渺水少+- 首选 目")
+local miao_group_raw = hybrid({ "渺水少+-" })
+ok(utf8.char(store:cp_of_id(miao_group_raw[1])) == "目",
+   "O 渺水少+- 单层表达式首选 目")
+
+local sen_group = hybrid({ "森", "木", "木", "+", "-" })
+ok(utf8.char(store:cp_of_id(sen_group[1])) == "木", "O 森木木+- 首选 木")
+
+local grouped_excluded = chars(hybrid({ "木木", "口", "日", "+", "!" }))
+ok(not contains(grouped_excluded, "啉"), "O 木木口日+! 排除 啉")
+ok(not contains(grouped_excluded, "晽"), "O 木木口日+! 排除 晽")
+
+local rpn_add = hybrid({ "木", "木", "+" })
 ok(utf8.char(store:cp_of_id(rpn_add[1])) == "林", "RPN 木木+ 首选 林")
-local rpn_sub = rpn({ "森", "木", "-" })
-ok(utf8.char(store:cp_of_id(rpn_sub[1])) == "林", "RPN 森木- 首选 林")
-local rpn_chain = rpn({ "森", "木", "-", "氵", "+" })
+local rpn_chain = hybrid({ "森", "木", "-", "氵", "+" })
 ok(utf8.char(store:cp_of_id(rpn_chain[1])) == "淋", "RPN 森木-氵+ 首选 淋")
-local rpn_zhang = rpn({ "章", "日", "-", "十", "-" })
-ok(utf8.char(store:cp_of_id(rpn_zhang[1])) == "立", "RPN 章日-十- 首选 立")
-local rpn_da = rpn({ "达", "大", "-" })
-ok(utf8.char(store:cp_of_id(rpn_da[1])) == "辶", "RPN 达大- 首选 辶")
 -- 结尾减法且栈内仍有多个操作数时，显示栈顶的中间结果。
-local rpn_partial_sub = rpn({ "渺", "沙", "少", "-" })
+local rpn_partial_sub = hybrid({ "渺", "沙", "少", "-" })
 ok(#rpn_partial_sub > 0, "RPN 渺沙少- 不消失")
 ok(utf8.char(store:cp_of_id(rpn_partial_sub[1])) == "氵",
    "RPN 渺沙少- 首选 氵")
-local rpn_full_sub = rpn({ "渺", "沙", "少", "-", "-" })
+local rpn_full_sub = hybrid({ "渺", "沙", "少", "-", "-" })
 ok(utf8.char(store:cp_of_id(rpn_full_sub[1])) == "眇",
    "RPN 渺沙少-- 首选 眇")
-local rpn_two_operands = rpn({ "木", "木" })
+local rpn_two_operands = hybrid({ "木", "木" })
 ok(utf8.char(store:cp_of_id(rpn_two_operands[1])) == "林",
    "RPN 木木 仍按同时包含")
-local rpn_excluded = chars(rpn({ "木", "木", "口", "!" }))
+local rpn_excluded = chars(hybrid({ "木", "木", "口", "!" }))
 ok(not contains(rpn_excluded, "啉"), "RPN 木木口! 排除 啉")
-local rpn_grouped_excluded = chars(rpn({ "木", "木", "口", "日", "+", "!" }))
-ok(not contains(rpn_grouped_excluded, "啉"), "RPN 木木口日+! 排除 啉")
-ok(not contains(rpn_grouped_excluded, "晽"), "RPN 木木口日+! 排除 晽")
-local rpn_miao = rpn({ "渺", "水", "少", "+", "-" })
+local rpn_miao = hybrid({ "渺", "水", "少", "+", "-" })
 ok(utf8.char(store:cp_of_id(rpn_miao[1])) == "目", "RPN 渺水少+- 首选 目")
-ok(#rpn({ "木", "-" }) == 0, "RPN 运算符不足返回空")
+ok(#hybrid({ "木", "-" }) == 0, "RPN 运算符不足返回空")
+ok(#hybrid({ "木-" }) == 0, "RPN 单层表达式运算符不足返回空")
 
-local group_steps = I.parse_algebra_steps({ "渺-(水少)" })
-ok(#group_steps == 3 and group_steps[1].item == "渺"
-   and group_steps[1].op == "+"
-   and group_steps[2].item == "水" and group_steps[2].op == "-"
-   and group_steps[3].item == "少" and group_steps[3].op == "-",
-   "括号解析 渺-(水少)")
+-- 单层原始表达式按 RPN 求值
+local raw_expr = hybrid({ "森木-" })
+ok(utf8.char(store:cp_of_id(raw_expr[1])) == "林", "RPN 单层 森木- 首选 林")
 
-local excl_steps = I.parse_algebra_steps({ "木木", "!(口日)" })
-ok(#excl_steps == 4 and excl_steps[3].item == "口"
-   and excl_steps[3].op == "!" and excl_steps[4].item == "日"
-   and excl_steps[4].op == "!", "括号解析 木木!(口日)")
+local comps, excludes = I.evaluate_rpn_expression(store, { "森", "木", "-" }, full)
+ok(#comps == 1 and comps[1] == "林" and #excludes == 0,
+   "RPN 求值 森木- -> 林")
+comps, excludes = I.evaluate_rpn_expression(store, { "木", "木", "口", "!" }, full)
+ok(#comps == 2 and #excludes == 1 and excludes[1] == "口",
+   "RPN 求值 木木口! 排除 口")
 
-ok(I.is_component_expression("渺-(水少)"), "括号表达式合法")
-ok(not I.is_component_expression("渺-(水+少)"), "括号内运算符非法")
-ok(not I.is_component_expression("渺-(水少"), "括号未闭合非法")
-
--- 括号编辑辅助函数
-local run_start, run_end = I.find_last_ascii_run("(沐-mu")
-ok(run_start ~= nil and string.sub("(沐-mu", run_start, run_end) == "mu",
-   "查找最后一个拼音段")
-ok(I.replace_last_ascii_run("(沐-mu", "木") == "(沐-木",
-   "替换最后一个拼音段")
-local open_group = I.parse_single_group("-(shui")
-ok(open_group and open_group.op == "-" and open_group.inner == "shui"
-   and not open_group.closed, "识别未闭合括号表达式")
-local closed_group = I.parse_single_group("-(沐-木)")
-ok(closed_group and closed_group.op == "-" and closed_group.inner == "沐-木"
-   and closed_group.closed, "识别已闭合括号表达式")
-
--- 退格重新打开已闭合括号
-ok(I.reopen_closed_group("(沙-少)") == "(沙-少", "退格重开括号 (沙-少)")
-ok(I.reopen_closed_group("-(沙-少)") == "-(沙-少", "退格重开括号 -(沙-少)")
-ok(I.reopen_closed_group("((沙-少))") == "((沙-少)", "退格重开嵌套括号")
-ok(I.reopen_closed_group("沙-少") == nil, "普通文本不重开括号")
-ok(I.reopen_closed_group("-(沙-少") == nil, "未闭合括号不重开")
-
-local comps, excludes = I.evaluate_algebra_expression(store, "沐-木", full)
-ok(#comps == 1 and comps[1] == "氵" and #excludes == 0,
-   "括号求值 沐-木 -> 氵")
-comps, excludes = I.evaluate_algebra_expression(store, "森-木", full)
-ok(#comps == 1 and comps[1] == "林", "括号求值 森-木 -> 林")
-comps, excludes = I.evaluate_algebra_expression(store, "沐!木", full)
-ok(#comps == 1 and comps[1] == "沐" and #excludes == 1 and excludes[1] == "木",
-   "括号求值 沐!木")
-comps, excludes = I.evaluate_algebra_expression(store, "沐 ' - 木", full)
-ok(#comps == 1 and comps[1] == "氵", "括号求值忽略分隔符")
-comps, excludes = I.evaluate_algebra_expression(store, "(沐-木)+口", full)
-ok(#comps == 2 and comps[1] == "氵" and comps[2] == "口",
-   "括号求值支持嵌套")
-ok(I.format_group_component("-", { "氵" }, {}) == "-氵",
-   "括号结果加外层运算符")
-
--- 模拟 Oshao 选少 → (mu 选沐 → -mu 选木 → ) 的括号编辑流程
-local pending = "(mu"
-pending = I.replace_last_ascii_run(pending, "沐")
-pending = pending .. "-mu"
-pending = I.replace_last_ascii_run(pending, "木")
-local flow_group = I.parse_single_group(pending .. ")")
-ok(flow_group and flow_group.closed and flow_group.inner == "沐-木",
-   "括号编辑流程 沐-木")
-local flow_comps = I.evaluate_algebra_expression(store, flow_group.inner, full)
-ok(#flow_comps == 1 and flow_comps[1] == "氵", "括号编辑流程求值 氵")
+ok(I.is_component_expression("木木口!"), "RPN 部件表达式合法")
+ok(I.is_component_expression("木木"), "纯部件表达式合法")
+ok(not I.is_component_expression("木木(口)"), "括号表达式非法")
+ok(I.is_component_expression("木木口"), "无运算符部件串仍合法")
 
 local shao_shui = hybrid({ "少", "氵" })
 ok(utf8.char(store:cp_of_id(shao_shui[1])) == "沙", "O 少+氵 首选 沙")
@@ -422,18 +357,6 @@ combo = {}
 for i, cand in ipairs(emitted) do combo[i] = cand.text end
 combo_text = table.concat(combo, " ")
 ok(contains(combo_text, "木木"), "Omumu 生成 木木 组合候选")
-
-local paren_flypy = I.parse_pending_components(store, "-(uv", flypy)
-ok(paren_flypy.valid and #paren_flypy.tokens == 1 and paren_flypy.tokens[1] == "shui",
-   "括号 pending 小鹤双拼 -(uv -> shui")
-
-local paren_quanpin = I.parse_pending_components(store, "-(shui", full)
-ok(paren_quanpin.valid and #paren_quanpin.tokens == 1 and paren_quanpin.tokens[1] == "shui",
-   "括号 pending 全拼 -(shui -> shui")
-
-local paren_multi = I.parse_pending_components(store, "-(shuishao)", full)
-ok(paren_multi.valid and #paren_multi.tokens == 2 and paren_multi.tokens[1] == "shui"
-   and paren_multi.tokens[2] == "shao", "括号 pending 全拼 -(shuishao) -> shui shao")
 
 _G.Candidate = saved_candidate
 _G.yield = saved_yield

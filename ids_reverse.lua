@@ -9,7 +9,6 @@
 -- 直接读取 C++ 版使用的 IDS4 单文件数据 ids_data.bin。
 
 local M = {}
-M._rpn = {}
 
 -- ---------------------------------------------------------------------------
 -- 常量与通用工具
@@ -285,28 +284,18 @@ local function format_ids(raw_ids, format)
   return table.concat(out)
 end
 
+-- 完整部件表达式（逆波兰后缀），例如 木木口! / 森木-；不接受括号和 ASCII。
 local function is_component_expression(text, max_chars)
   max_chars = max_chars or 32
   if text == "" or max_chars == 0 or has_whitespace(text) then return false end
   local count = 0
   local has_component = false
-  local depth = 0
   local i, n = 0, #text
   while i < n do
     local cp
     cp, i = decode_next(text, i)
     if cp == 0 then return false end
-    if cp == 0x28 or cp == 0x29 then
-      if cp == 0x28 then
-        depth = depth + 1
-      else
-        if depth == 0 then return false end
-        depth = depth - 1
-      end
-      count = count + 1
-    elseif cp == 0x2B or cp == 0x2D or cp == 0x21 then
-      -- 括号内不允许再写运算符；出现即视为非法表达式。
-      if depth > 0 then return false end
+    if cp == 0x2B or cp == 0x2D or cp == 0x21 then
       count = count + 1
     else
       if not is_component_char(cp) then return false end
@@ -315,7 +304,7 @@ local function is_component_expression(text, max_chars)
     end
     if count > max_chars then return false end
   end
-  return has_component and depth == 0
+  return has_component
 end
 
 local function is_component_code_point(cp)
@@ -3337,67 +3326,6 @@ local function normalize_algebra_item(store, raw, codec)
   return normalize_component(store, s, codec)
 end
 
-local function parse_algebra_steps(components)
-  local steps = {}
-  local curr_op = "+"
-  local groups = {}
-  for _, raw in ipairs(components) do
-    local s = strip_space(raw)
-    -- 上一条以 ! 结尾时，新条目默认恢复正向；显式运算符仍可覆盖。
-    -- 括号内不允许运算符，因此只在顶层做一次性的恢复。
-    if #groups == 0 and curr_op == "!" and s ~= ""
-       and s:sub(1, 1) ~= "+" and s:sub(1, 1) ~= "-" and s:sub(1, 1) ~= "!"
-       and s:sub(1, 1) ~= "(" then
-      curr_op = "+"
-    end
-    local i = 1
-    while i <= #s do
-      local c = s:sub(i, i)
-      if c == "(" then
-        groups[#groups + 1] = curr_op
-        i = i + 1
-      elseif c == ")" then
-        if #groups > 0 then
-          local outer = groups[#groups]
-          groups[#groups] = nil
-          if #groups > 0 and groups[#groups] == "!" then
-            curr_op = "!"
-          elseif outer == "!" then
-            curr_op = "+"
-          else
-            curr_op = outer
-          end
-        end
-        i = i + 1
-      elseif c == "+" or c == "-" or c == "!" then
-        -- 括号内不允许运算符；这里防御性忽略，不改变组内默认运算符。
-        if #groups == 0 then curr_op = c end
-        i = i + 1
-      else
-        local start = i
-        while i <= #s and s:sub(i, i) ~= "+" and s:sub(i, i) ~= "-"
-              and s:sub(i, i) ~= "!" and s:sub(i, i) ~= "("
-              and s:sub(i, i) ~= ")" do
-          i = i + 1
-        end
-        local item = s:sub(start, i - 1)
-        if item ~= "" then
-          if is_ascii_alpha_only(item) then
-            steps[#steps + 1] = { op = curr_op, item = item }
-          else
-            for _, ch in ipairs(utf8_chars(item)) do
-              steps[#steps + 1] = { op = curr_op, item = ch }
-            end
-          end
-        end
-        -- ! 在顶层是一次性的；作为括号默认运算符时对整组生效。
-        if curr_op == "!" and #groups == 0 then curr_op = "+" end
-      end
-    end
-  end
-  return steps
-end
-
 local function subtract_character(store, base, neg, depth, from_leaf)
   local norm_base = canon(base)
   local norm_neg = canon(neg)
@@ -3461,358 +3389,77 @@ local function apply_single_subtraction(store, current, neg)
 end
 
 -- ---------------------------------------------------------------------------
--- 减法待选：从最后一个已选部件中提取可减的下级部件
+-- 逆波兰后缀表达式求值
 -- ---------------------------------------------------------------------------
 
-local subtractable = {
-  STROKE_GLYPHS = {
-    ["一"] = true, ["丨"] = true, ["丿"] = true, ["丶"] = true,
-    ["乙"] = true, ["亅"] = true, ["⺀"] = true, ["𠄌"] = true,
-  },
-}
-
-function subtractable.is_stroke_glyph(glyph)
-  local chars = utf8_chars(glyph)
-  if #chars ~= 1 then return false end
-  local cp = decode_next(glyph, 0)
-  if cp == 0 then return false end
-  if subtractable.STROKE_GLYPHS[chars[1]] then return true end
-  return cp >= 0x31C0 and cp <= 0x31EF
-end
-
-function subtractable.is_atomic_glyph(glyph, from_leaf)
-  if ATOMIC_COMPONENTS[glyph] then return true end
-  -- 与 subtract_character 一致：顶层字按原始字形判断，递归叶子才用归一化字形。
-  if not from_leaf then return false end
-  local ch = canon(glyph)
-  if ATOMIC_COMPONENTS[ch] then return true end
-  if not subtractable.canonical_atomic then
-    subtractable.canonical_atomic = {}
-    for component in pairs(ATOMIC_COMPONENTS) do
-      subtractable.canonical_atomic[canon(component)] = true
-    end
-  end
-  return subtractable.canonical_atomic[ch] == true
-end
-
-function subtractable.collect(store, glyph, basics, intermediates, visiting,
-                              depth, is_root)
-  local key = canon(glyph)
-  if depth > 5 or subtractable.is_atomic_glyph(glyph, not is_root)
-      or visiting[key] then
-    if not is_root then basics[#basics + 1] = glyph end
-    return
-  end
-  local leaves = top_leaves_of_component(store, glyph, true)
-  if #leaves <= 1 then
-    if not is_root then basics[#basics + 1] = glyph end
-    return
-  end
-  -- 含笔画的字（如 少 = 小 + 丿）在子层视为基本部件不再拆成笔画；
-  -- 若是根节点自身（如 术 = 木 + 丶、丁 = 一 + 亅），直接保留其顶层叶子。
-  for _, leaf in ipairs(leaves) do
-    if subtractable.is_stroke_glyph(leaf) then
-      if is_root then
-        for _, dl in ipairs(leaves) do basics[#basics + 1] = dl end
-      else
-        basics[#basics + 1] = glyph
-      end
-      return
-    end
-  end
-  visiting[key] = true
-  if not is_root then intermediates[#intermediates + 1] = glyph end
-  for _, leaf in ipairs(leaves) do
-    subtractable.collect(store, leaf, basics, intermediates, visiting,
-                         depth + 1, false)
-  end
-  visiting[key] = nil
-end
-
-function subtractable.components(store, components)
-  local parts = {}
-  if not components or #components == 0 then return parts end
-
-  local target = components[#components]
-  if target == "" then return parts end
-  local first = target:sub(1, 1)
-  -- 负号层/排除层不是可分解的操作数。
-  if first == "-" or first == "!" then return parts end
-  if first == "+" then target = target:sub(2) end
-  if utf8_length(target) ~= 1 then return parts end
-
-  local basics, intermediates = {}, {}
-  local visiting = {}
-  subtractable.collect(store, target, basics, intermediates, visiting, 0, true)
-
-  local seen = { [canon(target)] = true }
-  local function add(list, allow_stroke)
-    if #parts >= 8 then return end
-    for _, part in ipairs(list) do
-      if #parts >= 8 then return end
-      if part ~= "" and (allow_stroke or not subtractable.is_stroke_glyph(part)) then
-        local key = canon(part)
-        if not seen[key] then
-          seen[key] = true
-          -- 必须在目标字上确实可减，且不会被更早的正向操作数先减掉。
-          if subtract_character(store, target, part, 0, false) then
-            local captured = false
-            for i = 1, #components - 1 do
-              local comp = components[i]
-              local lead = comp:sub(1, 1)
-              if lead ~= "-" and lead ~= "+" and lead ~= "!"
-                  and subtract_character(store, comp, part, 0, false) then
-                captured = true
-                break
-              end
-            end
-            if not captured then parts[#parts + 1] = part end
-          end
-        end
-      end
-    end
-  end
-  add(basics, true)
-  add(intermediates, false)
-
-  -- 第二梯队补充：从 comp_set 补充跨枝复合部件（如 渺->泪、屡->屎），按字频降序。
-  local target_cp = decode_next(target, 0)
-  local target_id = target_cp ~= 0 and store:id_of_cp(target_cp) or INVALID_ID
-  if target_id ~= INVALID_ID and #basics > 0 and #parts < 8 then
-    local tier1_sub = {}
-    for _, b in ipairs(basics) do
-      local bcp = decode_next(b, 0)
-      local bid = bcp ~= 0 and store:id_of_cp(bcp) or INVALID_ID
-      if bid ~= INVALID_ID then
-        for _, st in ipairs(store:comp_set(bid)) do
-          tier1_sub[st] = true
-        end
-      end
-    end
-    local extra = {}
-    for _, tok in ipairs(store:comp_set(target_id)) do
-      if not tier1_sub[tok] then
-        local p = store:token_str_of(tok)
-        local key = canon(p)
-        if p ~= "" and not seen[key] and not subtractable.is_stroke_glyph(p) then
-          local pcp = store:token_cp_of(tok)
-          local pid = pcp ~= 0 and store:id_of_cp(pcp) or INVALID_ID
-          if pid ~= INVALID_ID and #store:leaves(pid) >= 2 then
-            extra[#extra + 1] = { part = p, freq = store:hot_freq(pid) }
-          end
-        end
-      end
-    end
-    table.sort(extra, function(a, b) return a.freq > b.freq end)
-    for i = 1, #extra do
-      if #parts >= 8 then break end
-      local part = extra[i].part
-      local key = canon(part)
-      if not seen[key] then
-        seen[key] = true
-        local captured = false
-        for j = 1, #components - 1 do
-          local comp = components[j]
-          local lead = comp:sub(1, 1)
-          if lead ~= "-" and lead ~= "+" and lead ~= "!"
-              and subtract_character(store, comp, part, 0, false) then
-            captured = true
-            break
-          end
-        end
-        if not captured then parts[#parts + 1] = part end
-      end
-    end
-  end
-  return parts
-end
-
--- ---------------------------------------------------------------------------
--- 括号表达式求值（只算部件，不查词典）
--- ---------------------------------------------------------------------------
-
-local function find_last_ascii_run(s)
-  local last_start, last_end
-  local i = 1
-  while i <= #s do
-    local b = s:byte(i)
-    if b and ((b >= 0x41 and b <= 0x5A) or (b >= 0x61 and b <= 0x7A)) then
-      local start = i
-      while i <= #s do
-        local c = s:byte(i)
-        if not c or not ((c >= 0x41 and c <= 0x5A) or (c >= 0x61 and c <= 0x7A)) then
-          break
-        end
-        i = i + 1
-      end
-      last_start, last_end = start, i - 1
-    else
-      i = i + 1
-    end
-  end
-  if last_start then return last_start, last_end end
-  return nil
-end
-
-local function replace_last_ascii_run(s, text)
-  local start_pos, end_pos = find_last_ascii_run(s)
-  if not start_pos then return s end
-  return s:sub(1, start_pos - 1) .. text .. s:sub(end_pos + 1)
-end
-
--- pending 形如 [op]? ( ... )? 时返回 { op, inner, closed }；否则返回 nil。
-local function parse_single_group(pending)
-  if pending == "" then return nil end
-  local i = 1
-  local op = ""
-  local first = pending:sub(1, 1)
-  if first == "-" or first == "+" or first == "!" then
-    op = first
-    i = 2
-  end
-  if pending:sub(i, i) ~= "(" then return nil end
-  local open_pos = i
-  local depth = 0
-  local close_pos
-  local j = i
-  while j <= #pending do
-    local c = pending:sub(j, j)
-    if c == "(" then
-      depth = depth + 1
-    elseif c == ")" then
-      depth = depth - 1
-      if depth == 0 then
-        close_pos = j
-        break
-      end
-    end
-    j = j + 1
-  end
-  if close_pos then
-    if close_pos ~= #pending then return nil end
-    return { op = op, inner = pending:sub(open_pos + 1, close_pos - 1),
-             closed = true }
-  end
-  return { op = op, inner = pending:sub(open_pos + 1), closed = false }
-end
-
--- 若 code 是已闭合的单个括号表达式，返回去掉右括号后的文本。
-function M._rpn.reopen_closed_group(code)
-  if code == "" or code:sub(-1) ~= ")" then return nil end
-  local group = parse_single_group(code)
-  if not group or not group.closed then return nil end
-  return code:sub(1, -2)
-end
-
-local function format_group_component(op, components, excludes)
-  local out = table.concat(components)
-  for _, e in ipairs(excludes) do out = out .. "!" .. e end
-  if out == "" then return "" end
-  if op ~= "" then out = op .. out end
-  return out
-end
-
-local function apply_eval_item(store, st, op, raw, codec)
-  local item = normalize_algebra_item(store, raw, codec)
-  if item == "" then return end
-  if op == "+" then
-    st.components[#st.components + 1] = item
-  elseif op == "!" then
-    st.excludes[#st.excludes + 1] = item
-  else
-    st.has_sub = true
-    st.components = apply_single_subtraction(store, st.components, item)
-  end
-end
-
-local function merge_eval_group(store, st, op, inner)
-  st.has_sub = st.has_sub or inner.has_sub
-  for _, item in ipairs(inner.components) do
-    if op == "+" then
-      st.components[#st.components + 1] = item
-    elseif op == "!" then
-      st.excludes[#st.excludes + 1] = item
-    else
-      st.has_sub = true
-      st.components = apply_single_subtraction(store, st.components, item)
-    end
-  end
-  for _, e in ipairs(inner.excludes) do
-    st.excludes[#st.excludes + 1] = e
-  end
-end
-
-local function is_eval_separator(c)
+local function is_operand_separator(c)
   return c == "'" or c == " " or c == "\t" or c == "\r" or c == "\n"
          or c == "." or c == "_"
 end
 
-local function eval_algebra_seq(store, s, i, codec, stop)
-  local st = { components = {}, excludes = {}, has_sub = false }
-  local op = "+"
-  while i <= #s do
+local function clean_operand_text(s)
+  local out = {}
+  for i = 1, #s do
     local c = s:sub(i, i)
-    if c == ")" then
-      if stop then i = i + 1 end
-      break
-    elseif c == "(" then
-      local new_i, inner = eval_algebra_seq(store, s, i + 1, codec, true)
-      merge_eval_group(store, st, op, inner)
-      if op == "!" then op = "+" end
-      i = new_i
-    elseif c == "+" or c == "-" or c == "!" then
-      op = c
-      i = i + 1
-    elseif is_eval_separator(c) then
-      i = i + 1
+    if not is_operand_separator(c) then out[#out + 1] = c end
+  end
+  return table.concat(out)
+end
+
+local evaluate_rpn_layers
+
+-- 把一个状态层展开成一个操作数：ASCII 编码归一化为单个部件；汉字串按字符
+-- 拆分为同一操作数的多个部件；若层内自带后缀运算符，则递归按 RPN 求值。
+local function expand_rpn_operand(store, raw, codec)
+  local s = clean_operand_text(strip_space(raw))
+  if s == "" then return nil end
+
+  if is_ascii_alpha_only(s) then
+    local item = normalize_algebra_item(store, s, codec)
+    if item == "" then return nil end
+    return { components = { item }, excludes = {}, has_sub = false,
+             plus_after_sub = false }
+  end
+
+  local tokens, has_operator = {}, false
+  local pos = 0
+  while pos < #s do
+    local c = s:sub(pos + 1, pos + 1)
+    if c == "+" or c == "-" or c == "!" then
+      tokens[#tokens + 1] = c
+      has_operator = true
+      pos = pos + 1
     else
-      local start = i
-      while i <= #s do
-        local ch = s:sub(i, i)
-        if ch == "+" or ch == "-" or ch == "!" or ch == "(" or ch == ")"
-           or is_eval_separator(ch) then
-          break
-        end
-        i = i + 1
-      end
-      local item = s:sub(start, i - 1)
-      if item ~= "" then
-        if is_ascii_alpha_only(item) then
-          apply_eval_item(store, st, op, item, codec)
-          if op == "!" then op = "+" end
-        else
-          for _, ch in ipairs(utf8_chars(item)) do
-            apply_eval_item(store, st, op, ch, codec)
-            if op == "!" then op = "+" end
-          end
-        end
-      end
+      local b = s:byte(pos + 1)
+      if not b or b < 0x80 then return nil end
+      local start = pos
+      local cp
+      cp, pos = decode_next(s, pos)
+      if cp == 0 or pos == start then return nil end
+      tokens[#tokens + 1] = s:sub(start + 1, pos)
     end
   end
-  return i, st
+  if #tokens == 0 then return nil end
+  if not has_operator then
+    return { components = tokens, excludes = {}, has_sub = false,
+             plus_after_sub = false }
+  end
+
+  local comps, ex, pure_sub, has_sub = evaluate_rpn_layers(store, tokens, codec)
+  if not comps then return nil end
+  return {
+    components = comps,
+    excludes = ex,
+    has_sub = has_sub,
+    plus_after_sub = has_sub and not pure_sub,
+  }
 end
 
-local function evaluate_algebra_expression(store, expression, codec)
-  local _, st = eval_algebra_seq(store, expression, 1, codec, false)
-  return st.components, st.excludes
-end
-
--- 逆波兰后缀求值。非运算符层先按中缀表达式解析为一个操作数，因此括号结果、
--- 多字组合部件等都能直接入栈。返回 components, excludes, pure_sub, has_sub；
--- 运算符栈不足时返回 nil。
-function M._rpn.evaluate(store, components, codec)
+-- 逆波兰后缀求值。返回 components, excludes, pure_sub, has_sub；
+-- 运算符栈不足或操作数非法时返回 nil。
+function evaluate_rpn_layers(store, components, codec)
   local stack = {}
   local excludes = {}
-
-  local function push_operand(text)
-    local comps, ex = evaluate_algebra_expression(store, text, codec)
-    stack[#stack + 1] = {
-      components = comps,
-      excludes = ex,
-      has_sub = false,
-      plus_after_sub = false,
-    }
-  end
 
   for _, token in ipairs(components) do
     if token == "+" or token == "-" then
@@ -3850,7 +3497,9 @@ function M._rpn.evaluate(store, components, codec)
         excludes[#excludes + 1] = e
       end
     else
-      push_operand(token)
+      local value = expand_rpn_operand(store, token, codec)
+      if not value then return nil end
+      stack[#stack + 1] = value
     end
   end
 
@@ -4076,43 +3725,18 @@ local function search_by_leaves(store, leaves, codec, max_results,
 end
 
 local function search_hybrid(store, components, codec, max_results,
-                             disabled_blocks, notation)
+                             disabled_blocks)
   if #components == 0 then return {} end
-  local rpn = notation == "rpn"
   local cache_key = table.concat(components, "\1") .. ":" .. codec.id .. ":"
                     .. max_results .. disabled_cache_key(disabled_blocks)
-                    .. (rpn and ":rpn" or ":infix")
   local hit = cache_get(hybrid_cache, cache_key)
   if hit then return hit end
-  local current, excludes = {}, {}
-  local pure_sub = true
-  local has_sub = false
-  if rpn then
-    local comps, ex, rpn_pure_sub, rpn_has_sub =
-        M._rpn.evaluate(store, components, codec)
-    if not comps then
-      local empty = {}
-      cache_put(hybrid_cache, cache_key, empty, 256)
-      return empty
-    end
-    current, excludes = comps, ex
-    pure_sub, has_sub = rpn_pure_sub, rpn_has_sub
-  else
-    local steps = parse_algebra_steps(components)
-    for _, step in ipairs(steps) do
-      local item = normalize_algebra_item(store, step.item, codec)
-      if item ~= "" then
-        if step.op == "+" then
-          if #current > 0 and has_sub then pure_sub = false end
-          current[#current + 1] = item
-        elseif step.op == "!" then
-          excludes[#excludes + 1] = item
-        else
-          has_sub = true
-          current = apply_single_subtraction(store, current, item)
-        end
-      end
-    end
+  local current, excludes, pure_sub, has_sub =
+      evaluate_rpn_layers(store, components, codec)
+  if not current then
+    local empty = {}
+    cache_put(hybrid_cache, cache_key, empty, 256)
+    return empty
   end
 
   local exclude_entries = build_exclude_entries(store, excludes)
@@ -4302,7 +3926,6 @@ local function default_config()
     data_path = "ids_data.bin",
     custom_path = "",
     algebra = {},
-    algebra_notation = "infix",
     ids_format = "unicode",
     variant_trigger = "/",
     variant_replace_key = "Shift+V",
@@ -4367,7 +3990,6 @@ local function load_config(env)
   cfg.data_path = get_s("data_file", cfg.data_path)
   cfg.custom_path = get_s("custom_file", cfg.custom_path)
   cfg.algebra = get_algebra(conf, ns)
-  cfg.algebra_notation = get_s("algebra_notation", cfg.algebra_notation)
   cfg.ids_format = get_s("ids_format", cfg.ids_format)
   cfg.variant_trigger = get_s("variant_trigger", cfg.variant_trigger)
   cfg.variant_replace_key = get_s("variant_replace_key", cfg.variant_replace_key)
@@ -4384,7 +4006,6 @@ local function load_config(env)
   v = conf:get_bool(ns .. "/show_block")
   if v ~= nil then cfg.show_block = v end
 
-  if cfg.algebra_notation ~= "rpn" then cfg.algebra_notation = "infix" end
   if cfg.variant_trigger == "" then cfg.variant_trigger = "/" end
   if cfg.variant_replace_key == "" then cfg.variant_replace_key = "Shift+V" end
   if cfg.max_results <= 0 then cfg.max_results = 60 end
@@ -4536,52 +4157,8 @@ local function prepare_selected_candidate(seg)
   return seg:get_candidate_at(seg.selected_index)
 end
 
--- 括号闭合且内部拼音都已消歧后，求值并作为一个部件加入状态。
-local function try_commit_closed_group(ctx, env)
-  if not is_reverse_active(ctx, env.config.hybrid.prefix) then return false end
-  local st = read_hybrid_state(ctx, env.config.hybrid.prefix)
-  local group = parse_single_group(st.pending)
-  if not group or not group.closed then return false end
-  if find_last_ascii_run(st.pending) then return false end
-  local store = ensure_store(env.config)
-  if not store then return false end
-  local components, excludes = evaluate_algebra_expression(
-      store, group.inner, get_codec(store, env.config))
-  local base = ctx.input:sub(1, #ctx.input - #st.pending)
-  if env.config.algebra_notation == "rpn" then
-    -- 后缀模式：括号结果先作为操作数入栈，外层 +/-/! 改写为后缀运算符。
-    local component = format_group_component("", components, excludes)
-    if component == "" then
-      ctx.input = base
-      return true
-    end
-    local code = group.op ~= "" and ("(" .. group.inner .. ")") or st.pending
-    st.components[#st.components + 1] = component
-    st.codes[#st.codes + 1] = code
-    local new_input = base .. code .. "'"
-    if group.op ~= "" then
-      st.components[#st.components + 1] = group.op
-      st.codes[#st.codes + 1] = group.op
-      new_input = new_input .. group.op .. "'"
-    end
-    save_hybrid_state(ctx, st.components, st.codes)
-    ctx.input = new_input
-    return true
-  end
-  local component = format_group_component(group.op, components, excludes)
-  if component == "" then
-    ctx.input = base
-    return true
-  end
-  st.components[#st.components + 1] = component
-  st.codes[#st.codes + 1] = st.pending
-  save_hybrid_state(ctx, st.components, st.codes)
-  ctx.input = base .. st.pending .. "'"
-  return true
-end
-
--- 逆波兰后缀模式下，按当前已保存的部件层计算表达式栈深度并判断运算符是否可用。
-function M._rpn.can_apply(components, op)
+-- 按当前已保存的部件层计算表达式栈深度并判断运算符是否可用。
+local function rpn_can_apply(components, op)
   local depth = 0
   for _, component in ipairs(components) do
     if component == "+" or component == "-" then
@@ -4599,7 +4176,7 @@ function M._rpn.can_apply(components, op)
 end
 
 -- 把后缀运算符作为一个独立状态层追加到输入末尾。
-function M._rpn.append(ctx, env, st, op)
+local function rpn_append(ctx, env, st, op)
   if not ctx.composition:empty()
      and ctx.composition:back():has_tag(env.config.hybrid.tag) then
     ctx:clear_non_confirmed_composition()
@@ -4713,11 +4290,6 @@ local function try_replace_variant(ctx, env)
   local pending_query = st.pending:sub(1, #st.pending - #trigger)
   local result_replacement = pending_query == ""
   local component = variant
-  if pending_query ~= "" and
-     (pending_query:sub(1, 1) == "-" or pending_query:sub(1, 1) == "+"
-      or pending_query:sub(1, 1) == "!") then
-    component = pending_query:sub(1, 1) .. variant
-  end
 
   ctx:set_property(VARIANTS_PROPERTY, "")
   ctx:set_property(VARIANTS_RESULT_PROPERTY, variant)
@@ -4770,25 +4342,9 @@ local function on_select(ctx, env)
 
   local st = read_hybrid_state(ctx, env.config.hybrid.prefix)
 
-  -- 括号内：只把当前拼音段替换成所选汉字，不提交为状态部件。
-  local group = parse_single_group(st.pending)
-  if group then
-    local run_start = find_last_ascii_run(st.pending)
-    if run_start and component ~= "" then
-      local new_pending = replace_last_ascii_run(st.pending, component)
-      local base = ctx.input:sub(1, #ctx.input - #st.pending)
-      ctx.input = base .. new_pending
-      try_commit_closed_group(ctx, env)
-    end
-    return
-  end
-
-  if st.pending ~= "" and component ~= "" then
-    local first = st.pending:sub(1, 1)
-    if (first == "-" or first == "+" or first == "!")
-       and component:sub(1, 1) ~= first then
-      component = first .. component
-    end
+  local tail = ""
+  if cand._end > 0 and cand._end < #ctx.input then
+    tail = ctx.input:sub(cand._end + 1)
   end
   local tail = ""
   if cand._end > 0 and cand._end < #ctx.input then
@@ -4895,16 +4451,9 @@ local function processor_func(key_event, env)
           ctx:confirm_current_selection()
           return 1
         end
-        -- 括号内单字部件也用回车确认，交给 on_select 替换当前拼音段。
-        if parse_single_group(st.pending) then
-          ctx:confirm_current_selection()
-          return 1
-        end
       end
     end
-    if parse_single_group(st.pending) then return 1 end
-    if st.pending ~= "" and st.pending ~= "-" and st.pending ~= "+"
-       and st.pending ~= "!" then
+    if st.pending ~= "" then
       if not ctx.composition:empty() then ctx.composition:pop_back() end
       st.components[#st.components + 1] = st.pending
       st.codes[#st.codes + 1] = st.pending
@@ -4933,23 +4482,6 @@ local function processor_func(key_event, env)
       end
       ctx:pop_input(pending_bytes)
     elseif #st.components > 0 then
-      -- 已闭合括号在状态中是一个整体层；退格时先重新打开括号，
-      -- 让后续退格能逐个字符删除，而不是一次删除整个括号表达式。
-      local reopened
-      if #st.codes > 0 then
-        reopened = M._rpn.reopen_closed_group(st.codes[#st.codes])
-      end
-      if reopened then
-        local suffix = st.codes[#st.codes] .. "'"
-        if ends_with(ctx.input, suffix) then
-          local base = ctx.input:sub(1, #ctx.input - #suffix)
-          st.components[#st.components] = nil
-          st.codes[#st.codes] = nil
-          save_hybrid_state(ctx, st.components, st.codes)
-          ctx.input = base .. reopened
-          return 1
-        end
-      end
       local code_len = #st.codes[#st.codes]
       st.components[#st.components] = nil
       st.codes[#st.codes] = nil
@@ -5004,6 +4536,9 @@ local function processor_func(key_event, env)
   local is_rparen = not ctrl and not alt
                     and (code == 0x29 or repr == ")" or repr == "parenright")
 
+  -- 括号分组已移除：忽略括号按键，避免落入标点处理器。
+  if is_lparen or is_rparen then return 1 end
+
   if is_variant then
     ctx:set_property(VARIANTS_RESULT_PROPERTY, "")
     if not ctx:has_menu() or ctx.composition:empty() then return 2 end
@@ -5049,18 +4584,12 @@ local function processor_func(key_event, env)
     return 1
   end
 
-  if is_letter or is_minus or is_plus or is_exclude
-     or is_lparen or is_rparen then
+  if is_letter or is_minus or is_plus or is_exclude then
     local variant_result = ctx:get_property(VARIANTS_RESULT_PROPERTY)
     if variant_result ~= "" then
       local st = read_hybrid_state(ctx, env.config.hybrid.prefix)
-      local already_component = false
-      if #st.components > 0 then
-        local last = st.components[#st.components]
-        local base = (last:sub(1, 1) == "-" or last:sub(1, 1) == "+"
-                      or last:sub(1, 1) == "!") and last:sub(2) or last
-        already_component = base == variant_result
-      end
+      local already_component = #st.components > 0
+                                and st.components[#st.components] == variant_result
       ctx:set_property(VARIANTS_RESULT_PROPERTY, "")
       ctx:set_property(VARIANTS_PROPERTY, "")
       if not already_component then
@@ -5072,24 +4601,21 @@ local function processor_func(key_event, env)
       end
     end
 
-    if env.config.algebra_notation == "rpn"
-       and (is_minus or is_plus or is_exclude) then
+    if is_minus or is_plus or is_exclude then
       local st = read_hybrid_state(ctx, env.config.hybrid.prefix)
       if st.pending == "" then
         local op = is_minus and "-" or (is_plus and "+" or "!")
-        if #st.components > 0 and M._rpn.can_apply(st.components, op) then
-          M._rpn.append(ctx, env, st, op)
+        if #st.components > 0 and rpn_can_apply(st.components, op) then
+          rpn_append(ctx, env, st, op)
         end
-        return 1
       end
+      return 1
     end
 
     local ch
     if is_minus then ch = "-"
     elseif is_plus then ch = "+"
     elseif is_exclude then ch = "!"
-    elseif is_lparen then ch = "("
-    elseif is_rparen then ch = ")"
     else ch = repr:sub(1, 1) end
     if ch:match("^[A-Z]$") then ch = ascii_lower(ch) end
     if ctx.caret_pos ~= #ctx.input then ctx.caret_pos = #ctx.input end
@@ -5099,7 +4625,6 @@ local function processor_func(key_event, env)
     end
     ctx:set_property(VARIANTS_PROPERTY, "")
     ctx:push_input(ch)
-    if is_rparen then try_commit_closed_group(ctx, env) end
     return 1
   end
 
@@ -5290,21 +4815,6 @@ local function build_component_candidates(store, results, segment, config)
   end
 end
 
-function subtractable.build_candidates(store, parts, segment, config)
-  for _, text in ipairs(parts) do
-    local cp = decode_next(text, 0)
-    local id = cp ~= 0 and store:id_of_cp(cp) or INVALID_ID
-    if id == INVALID_ID
-        or not (config.disabled_blocks_enabled
-                and config.disabled_blocks[store:hot_block(id)]) then
-      local cand = Candidate("hanzi_component", segment.start, segment._end,
-                             text, "可减部件")
-      cand.quality = 100.0
-      yield(cand)
-    end
-  end
-end
-
 local function build_multi_component_candidates(store, tokens, segment, config,
                                                 ctx)
   local per_token_limit = 4
@@ -5429,14 +4939,6 @@ local function parse_pending_components(store, pending, codec)
   local out = { valid = false, tokens = {} }
   if pending == "" then return out end
   local i = 1
-  while i <= #pending do
-    local c = pending:sub(i, i)
-    if c == "-" or c == "+" or c == "!" or c == "(" then
-      i = i + 1
-    else
-      break
-    end
-  end
   local ascii = {}
   local function flush_ascii()
     if #ascii == 0 then return true end
@@ -5450,10 +4952,8 @@ local function parse_pending_components(store, pending, codec)
   end
   while i <= #pending do
     local c = pending:sub(i, i)
-    if c == "-" or c == "+" then return out end
-    if c == "(" or c == ")" then
-      if not flush_ascii() then return out end
-      i = i + 1
+    if c == "-" or c == "+" or c == "!" or c == "(" or c == ")" then
+      return out
     elseif c == "'" or c == " " or c == "\t" or c == "\r" or c == "\n"
        or c == "." or c == "_" then
       if not flush_ascii() then return out end
@@ -5540,55 +5040,14 @@ local function query_hybrid(segment, env)
     return
   end
 
-  -- 括号编辑：只消歧最后一个拼音段，选中后写回 pending。
-  local group = parse_single_group(pending)
-  if group and has_component then
-    local run_start, run_end = find_last_ascii_run(pending)
-    if run_start then
-      local run = pending:sub(run_start, run_end)
-      local codec = get_codec(store, env.config)
-      local tokens = segment_alpha_string(store, run, codec)
-      if #tokens >= 2 then
-        build_multi_component_candidates(store, tokens, segment, env.config, ctx)
-      elseif #tokens == 1 then
-        local results = get_component_candidates(store, run, codec, 80)
-        build_component_candidates(store, results, segment, env.config)
-      end
-    end
-    return
-  end
-
-  local is_operator_only = false
-  if pending ~= "" then
-    is_operator_only = true
-    for idx = 1, #pending do
-      local b = pending:sub(idx, idx)
-      if b ~= "-" and b ~= "+" and b ~= "!" and b ~= "(" and b ~= ")" then
-        is_operator_only = false
-        break
-      end
-    end
-  end
-
-  if (pending == "" or is_operator_only) and #st.components > 0 then
-    -- 减法待选：先把前一个部件中可减的下级部件排在结果候选之前。
-    if pending == "-" and env.config.algebra_notation ~= "rpn" then
-      local parts = subtractable.components(store, st.components)
-      if #parts > 0 then
-        subtractable.build_candidates(store, parts, segment, env.config)
-      end
-    end
-    local comp_list = {}
-    for _, comp in ipairs(st.components) do comp_list[#comp_list + 1] = comp end
-    if pending ~= "" then comp_list[#comp_list + 1] = pending end
-    local results = search_hybrid(store, comp_list,
+  if pending == "" and #st.components > 0 then
+    local results = search_hybrid(store, st.components,
                                   get_codec(store, env.config),
                                   env.config.max_results,
                                   env.config.disabled_blocks_enabled
-                                    and env.config.disabled_blocks or nil,
-                                  env.config.algebra_notation)
+                                    and env.config.disabled_blocks or nil)
     build_result_candidates(store, results, segment, pending, env.config, ctx)
-  elseif pending ~= "" and not is_operator_only and has_component then
+  elseif pending ~= "" and has_component then
     local parsed = parse_pending_components(store, pending,
                                             get_codec(store, env.config))
     if parsed.valid and #parsed.tokens >= 2 then
@@ -5658,16 +5117,6 @@ local function filter_func(input, env)
     return
   end
 
-  local st = read_hybrid_state(ctx, env.config.hybrid.prefix)
-  local group = parse_single_group(st.pending)
-  if group and group.valid then
-    local run_start, run_end = find_last_ascii_run(st.pending)
-    if not run_start then
-      -- 括号内无未完成的拼音，不展示任何杂项候选
-      return
-    end
-  end
-
   local seen = {}
   local scanned = 0
   for cand in input:iter() do
@@ -5733,17 +5182,9 @@ M._internal = {
   get_codec = get_codec,
   normalize_component = normalize_component,
   parse_pending_components = parse_pending_components,
-  parse_algebra_steps = parse_algebra_steps,
-  parse_single_group = parse_single_group,
-  reopen_closed_group = M._rpn.reopen_closed_group,
-  find_last_ascii_run = find_last_ascii_run,
-  replace_last_ascii_run = replace_last_ascii_run,
-  evaluate_algebra_expression = evaluate_algebra_expression,
-  evaluate_rpn_expression = M._rpn.evaluate,
-  format_group_component = format_group_component,
+  evaluate_rpn_expression = evaluate_rpn_layers,
   is_component_expression = is_component_expression,
   build_multi_component_candidates = build_multi_component_candidates,
-  subtractable_components = subtractable.components,
   build_variant_candidates = build_variant_candidates,
   clear_query_caches = clear_query_caches,
   load_config = load_config,

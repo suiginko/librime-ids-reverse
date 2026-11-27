@@ -135,7 +135,6 @@ void LoadReverseConfig(const rime::Ticket& ticket,
   conf->GetString(ns + "/data_file", &config->data_path);
   conf->GetString(ns + "/custom_file", &config->custom_path);
   LoadAlgebra(conf, ns, &config->algebra);
-  conf->GetString(ns + "/algebra_notation", &config->algebra_notation);
   conf->GetString(ns + "/ids_format", &config->ids_format);
   conf->GetString(ns + "/variant_trigger", &config->variant_trigger);
   conf->GetString(ns + "/variant_replace_key", &config->variant_replace_key);
@@ -165,8 +164,6 @@ void LoadReverseConfig(const rime::Ticket& ticket,
     config->variant_trigger = "/";
   if (config->variant_replace_key.empty())
     config->variant_replace_key = "Shift+V";
-  if (config->algebra_notation != "rpn")
-    config->algebra_notation = "infix";
   if (config->max_results <= 0)
     config->max_results = 60;
 

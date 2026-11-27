@@ -1,7 +1,7 @@
 # AGENTS.md — rime-ids-reverse
 
 Librime plugin providing **IDS component search** (部件检字). It answers
-queries such as `I木口`, `Ikouhao`, `O木木`, and `O森-木+氵` from a single
+queries such as `I木口`, `Ikouhao`, `O木木`, and `O森木-氵+` from a single
 memory-mapped `ids_data.bin` file.
 
 There are two interchangeable implementations of the same behavior:
@@ -23,8 +23,7 @@ Chinese; preserve that.
 | `src/ids_reverse_composer.{h,cc}` | `IdsReverseProcessor`, `IdsReverseSegmentor`, `IdsReverseFilter`; all key handling. |
 | `src/ids_reverse_input.{h,cc}` | `InputCodec`: apply `ids_reverse/algebra` to the toneless pinyin syllabary, segment input codes, exact/prefix lookup. |
 | `src/ids_reverse_translator.{h,cc}` | Translator, I-mode search, O-mode candidate construction. |
-| `src/ids_reverse_search.{h,cc}` | O-mode `SearchHybrid` (add/subtract/exclude algebra) and component candidates. |
-| `src/ids_reverse_group.{h,cc}` | O-mode single-group pending parser and group-component formatting helpers. |
+| `src/ids_reverse_search.{h,cc}` | O-mode `SearchHybrid` (RPN add/subtract/exclude algebra) and component candidates. |
 | `ids_reverse.lua` | Whole Lua implementation; exports `processor`/`segmentor`/`translator`/`filter` and `_internal` for tests. |
 | `data/` | Generator, raw input tables, ignored outputs. |
 | `examples/` | Standalone schema and patch templates. |
@@ -134,9 +133,8 @@ by the ticket namespace). Shared settings live at the top level; only
 - I mode = **search**: `search_prefix` (default `I`), `search_tag`,
   `search_tips`.
 - O mode = **hybrid**: `hybrid_prefix` (default `O`), `hybrid_tag`,
-  `hybrid_tips`.
-- O mode algebra notation: `algebra_notation` = `infix` (default) or `rpn`
-  (postfix: operands first, then `+`/`-`/`!`).
+  `hybrid_tips`. Component algebra is always **RPN/postfix**: operands first,
+  then `+`/`-`/`!`; there is no infix mode or notation option.
 - Input encoding: `algebra` is a list of Rime spelling-algebra rules. Empty
   means identity/full pinyin. Rules are applied to the toneless syllable set to
   produce `code -> pinyin`, exactly like `DictCompiler::BuildPrism`.
@@ -197,52 +195,35 @@ as a multi-character combo are stored as one layer; Backspace removes
 `len(code) + 1` bytes (the code plus its following quote).
 
 - **Processor**: Return confirms result/multi-char candidates or turns a pending
-  code into a component; Backspace removes pending text or the last component;
+  code into a component; Backspace removes pending text or the last state layer;
   `1`–`6` and `;` select; space confirms; `/` starts a variant query;
   `Shift+V` replaces the preedit character with the selected variant;
-  letters and `-`/`+`/`!` are pushed as input. In `algebra_notation: rpn` mode,
-  `-`/`+`/`!` are committed as postfix operator layers instead. Backspace
-  reopens a just-closed group (e.g. `O渺-(沙-少)` → `O渺-(沙-少`) so the
-  group can be deleted character by character. After deleting a state layer it
-  re-tags the last retained segment as a hybrid result segment and forces a
-  recompose, so the candidate list refreshes instead of going stale.
-  `select_notifier` temporarily disables `_auto_commit` and commits result
-  candidates itself.
-- **Parentheses** are edited incrementally: while `pending` is a single
-  `[op]? ( ... )?` expression, selecting a component replaces only the last
-  unresolved ASCII pinyin run and does not commit state. When `)` closes the
-  outermost group and no ASCII runs remain, the processor evaluates the inner
-  expression with `EvaluateAlgebraExpression`, stores the remaining components
-  (plus any `!` exclusions) as one component, and pushes a quote.
+  letters are pushed as input; `-`/`+`/`!` are committed as postfix operator
+  layers when the stack has enough operands. Parentheses are ignored. After
+  deleting a state layer it re-tags the last retained segment as a hybrid result
+  segment and forces a recompose, so the candidate list refreshes instead of
+  going stale. `select_notifier` temporarily disables `_auto_commit` and commits
+  result candidates itself.
 - **Segmentor**: emits the prefix segment, confirmed component segments, and a
   pending `hanzi_component` segment; operators get confirmed segments.
 - **Translator** (`QueryHybrid`), in order: variant-result stage, variant query,
-  single-group editor (component candidates for the last ASCII run), results for
-  selected components, pending multi-syllable/multi-character candidates,
-  single-component candidates, raw component expressions. With infix pending
-  `-`, subtractable parts of the last component are emitted before the result
-  candidates: basic parts first, then intermediate composites (see
-  `GetSubtractableParts` / `subtractable.components`).
+  results for selected components, pending multi-syllable/multi-character
+  candidates, single-component candidates, raw component expressions.
 - **Filter**: drops non-plugin candidates, deduplicates component expressions,
   and scans at most 2000 candidates to avoid walking huge dictionaries.
-- **Search**: `SearchHybrid` applies `-`, `+`/`=`, and `!` algebra with `()`
-  grouping, expands pure subtraction to characters containing the remainder,
-  matches leaves, then ranks. With `algebra_notation: rpn`, state operator
-  layers are evaluated by `EvaluateRpnComponents` instead: operands are pushed
-  first, `+`/`-` combine the top two values, and postfix `!` moves the top value
-  to the exclusion list. If the final token is `-` and multiple stack values
-  remain, results come from the top value (the just-computed difference) rather
-  than intersecting all remaining values. Exact top-level leaf multiset hits from
+- **Search**: `SearchHybrid` always evaluates the state layers as RPN. Operands
+  are pushed first, `+`/`-` combine the top two values, and postfix `!` moves the
+  top value to the exclusion list. A non-operator layer is one operand: ASCII is
+  normalized as a code, a Chinese string is split into its characters, and a
+  layer containing operators is evaluated recursively as a nested RPN
+  expression. If the final token is `-` and multiple stack values remain,
+  results come from the top value (the just-computed difference) rather than
+  intersecting all remaining values. Exact top-level leaf multiset hits from
   `LEAF_STRUCT` are merged first and scored with the same exact-structure floor
-  as I mode. Group parentheses are resolved before state entry, so `SearchHybrid`
-  normally receives only paren-free component strings. Hybrid ranking keys are
-  literal original-glyph hits, structural score, frequency, then candidate
-  index. Literal hits are computed from raw `LEAVES` tokens recursively and are
-  only evaluated when the query contains a `CanonMap` glyph (key or value).
-- **Group evaluator**: `EvaluateAlgebraExpression` (C++) /
-  `evaluate_algebra_expression` (Lua) computes `+`/`-`/`!` and nested
-  parentheses over components only, without dictionary lookup. It is used when
-  committing a closed group, not by `SearchHybrid`.
+  as I mode. Hybrid ranking keys are literal original-glyph hits, structural
+  score, frequency, then candidate index. Literal hits are computed from raw
+  `LEAVES` tokens recursively and are only evaluated when the query contains a
+  `CanonMap` glyph (key or value).
 
 Variants use the properties `ids_reverse_variants` (base character) and
 `ids_reverse_variants_result` (replacement), plus the internal segment tag
@@ -338,8 +319,7 @@ one changed. Applies to:
 | Add block name/alias | `ids_store.cc`, both `kBlockNames`, Lua tables, dump script |
 | Change input encoding (spelling algebra) | `src/ids_reverse_input.{h,cc}`, `src/ids_reverse_config.{h,cc}`, Lua `build_codec`/`get_codec`, `README.md` |
 | Change search/ranking | `src/ids_reverse_translator.cc` (`SearchComponents`, `ScoreCandidate`) and/or `src/ids_reverse_search.cc` (`SearchHybrid`), plus Lua equivalents |
-| Change O-mode algebra notation | `src/ids_reverse_config.{h,cc}`, `src/ids_reverse_search.{h,cc}` (`EvaluateRpnComponents`), composer processor, Lua `load_config`/`_rpn`/`search_hybrid` |
-| Change O-mode group editing | `src/ids_reverse_group.{h,cc}`, composer `OnSelectAfter`/`ProcessKeyEvent`, translator `QueryHybrid`, `EvaluateAlgebraExpression`, plus Lua equivalents |
+| Change O-mode RPN evaluation | `src/ids_reverse_search.{h,cc}` (`EvaluateRpnLayers`/`ExpandRpnOperand`), composer processor, Lua `evaluate_rpn_layers`/`expand_rpn_operand`/`search_hybrid` |
 
 ## Before committing
 

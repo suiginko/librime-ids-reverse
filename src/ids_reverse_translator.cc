@@ -24,7 +24,6 @@
 #include <rime/translation.h>
 
 #include "ids_reverse_config.h"
-#include "ids_reverse_group.h"
 #include "ids_reverse_input.h"
 #include "ids_reverse_search.h"
 #include "ids_store.h"
@@ -255,36 +254,19 @@ bool IsComponentCodePoint(uint32_t cp) {
          (cp >= 0x20000 && cp <= 0x2FA1F) || (cp >= 0x30000 && cp <= 0x323AF);
 }
 
-// 完整汉字表达式，例如 木木!口 / 森-木 / 渺-(水少)；不接受 ASCII 拼音。
-// 括号内只允许部件，不允许再出现 + / - / !。
+// 完整部件表达式，例如 木木口! / 森木-；按逆波兰后缀解释。
+// 不再接受括号；ASCII 拼音和空白也不属于表达式。
 bool IsComponentExpression(const std::string& text) {
   if (text.empty())
     return false;
   size_t count = 0;
   bool has_component = false;
-  int depth = 0;
   size_t i = 0;
   while (i < text.size()) {
     unsigned char c = static_cast<unsigned char>(text[i]);
     if (c == ' ' || c == '\t' || c == '\r' || c == '\n')
       return false;
-    if (c == '(' || c == ')') {
-      if (c == '(') {
-        ++depth;
-      } else {
-        if (depth == 0)
-          return false;
-        --depth;
-      }
-      ++count;
-      if (count > 32)
-        return false;
-      ++i;
-      continue;
-    }
     if (c == '+' || c == '-' || c == '!') {
-      if (depth > 0)
-        return false;
       ++i;
       ++count;
       if (count > 32)
@@ -302,7 +284,7 @@ bool IsComponentExpression(const std::string& text) {
     if (count > 32)
       return false;
   }
-  return has_component && depth == 0;
+  return has_component;
 }
 
 PendingComponents ParsePendingComponents(IdsStore& store,
@@ -313,11 +295,6 @@ PendingComponents ParsePendingComponents(IdsStore& store,
     return out;
 
   size_t i = 0;
-  // 跳过所有前置运算符及左括号，例如 -, +, !, (, -(, +(, !(
-  while (i < pending.size() && (pending[i] == '-' || pending[i] == '+' ||
-                                pending[i] == '!' || pending[i] == '(')) {
-    ++i;
-  }
 
   std::string ascii;
   auto flush_ascii = [&]() -> bool {
@@ -334,14 +311,8 @@ PendingComponents ParsePendingComponents(IdsStore& store,
 
   while (i < pending.size()) {
     unsigned char c = static_cast<unsigned char>(pending[i]);
-    if (c == '-' || c == '+')
-      return out;  // 一次连写内部的运算符暂不支持
-    if (c == '(' || c == ')') {
-      if (!flush_ascii())
-        return out;
-      ++i;
-      continue;
-    }
+    if (c == '-' || c == '+' || c == '!' || c == '(' || c == ')')
+      return out;  // 一次连写内部不支持运算符或括号
     if (IsPendingSeparator(c)) {
       if (!flush_ascii())
         return out;
@@ -1467,7 +1438,6 @@ void IdsReverseTranslator::BuildResultCandidates(
     IdsStore& store,
     const std::vector<uint32_t>& results,
     const rime::Segment& segment,
-    const std::string& pending,
     rime::FifoTranslation* translation) {
   bool show_pinyin = config_.show_pinyin;
   bool show_ids = config_.show_ids;
@@ -1485,15 +1455,6 @@ void IdsReverseTranslator::BuildResultCandidates(
       show_block = ctx->get_option("show_block");
   }
   std::string preedit = "\xe2\x80\x8b";
-  if (ctx && segment.end > segment.start &&
-      segment.end <= static_cast<int>(ctx->input().size())) {
-    std::string seg_text =
-        ctx->input().substr(segment.start, segment.end - segment.start);
-    if (!seg_text.empty() && seg_text != "'")
-      preedit = seg_text;
-  } else if (!pending.empty()) {
-    preedit = pending;
-  }
 
   for (uint32_t id : results) {
     uint32_t cp = store.CpOfId(id);
@@ -1522,27 +1483,6 @@ void IdsReverseTranslator::BuildComponentCandidates(
     std::string text = CpToUtf8(cp);
     auto cand = rime::New<rime::SimpleCandidate>(
         "hanzi_component", segment.start, segment.end, text, "");
-    cand->set_quality(100.0);
-    translation->Append(cand);
-  }
-}
-
-void IdsReverseTranslator::BuildSubtractablePartCandidates(
-    IdsStore& store,
-    const std::vector<std::string>& parts,
-    const rime::Segment& segment,
-    rime::FifoTranslation* translation) {
-  hash_set<std::string> seen;
-  for (const auto& part : parts) {
-    if (part.empty() || !seen.insert(part).second)
-      continue;
-    uint32_t cp = CpOf(part);
-    uint32_t id = cp ? store.IdOfCp(cp) : kInvalidId;
-    if (id != kInvalidId && config_.disabled_blocks_enabled &&
-        config_.disabled_blocks.count(static_cast<int>(store.Hot(id).block)))
-      continue;
-    auto cand = rime::New<rime::SimpleCandidate>(
-        "hanzi_component", segment.start, segment.end, part, "可减部件");
     cand->set_quality(100.0);
     translation->Append(cand);
   }
@@ -1740,13 +1680,7 @@ rime::an<rime::Translation> IdsReverseTranslator::QueryHybrid(
       variant_result_stage = true;
     } else if (pending.empty() && !st.components.empty()) {
       // 待输入原字替换：异体字已作为最后一个部件加入状态。
-      const std::string& last = st.components.back();
-      const std::string base =
-          (!last.empty() &&
-           (last[0] == '-' || last[0] == '+' || last[0] == '!'))
-              ? last.substr(1)
-              : last;
-      variant_result_stage = (base == variant_result);
+      variant_result_stage = (st.components.back() == variant_result);
     }
   }
   if (variant_result_stage) {
@@ -1799,47 +1733,12 @@ rime::an<rime::Translation> IdsReverseTranslator::QueryHybrid(
       BuildVariantCandidates(store, base_id, base, preedit, segment,
                              translation.get());
     }
-  } else if (has_component && ParseSingleGroup(pending).valid) {
-    // 括号编辑：只消歧最后一个拼音段，选中后由 processor 写回 pending。
-    size_t run_start = 0, run_end = 0;
-    if (FindLastAsciiRun(pending, &run_start, &run_end)) {
-      std::string run = pending.substr(run_start, run_end - run_start);
-      std::vector<std::string> tokens = Codec().Segment(run);
-      if (tokens.size() >= 2) {
-        BuildMultiComponentCandidates(store, tokens, segment,
-                                      translation.get());
-      } else if (tokens.size() == 1) {
-        std::vector<uint32_t> results =
-            GetComponentCandidates(store, run, Codec(), 80);
-        BuildComponentCandidates(store, results, segment, translation.get());
-      }
-    }
-  } else if (!st.components.empty() &&
-             ([&]() {
-               if (pending.empty())
-                 return true;
-               for (char c : pending) {
-                 if (c != '-' && c != '+' && c != '!' && c != '(' && c != ')')
-                   return false;
-               }
-               return true;
-             })()) {
-    // 减法待选：先把前一个部件中可减的下级部件排在结果候选之前。
-    if (pending == "-" && !IsRpnNotation(config_)) {
-      std::vector<std::string> parts =
-          GetSubtractableParts(store, st.components);
-      BuildSubtractablePartCandidates(store, parts, segment, translation.get());
-    }
-    std::vector<std::string> comp_list = st.components;
-    if (!pending.empty())
-      comp_list.push_back(pending);
+  } else if (pending.empty() && !st.components.empty()) {
     std::vector<uint32_t> results = SearchHybrid(
-        store, comp_list, Codec(), config_.max_results,
-        config_.disabled_blocks_enabled ? &config_.disabled_blocks : nullptr,
-        IsRpnNotation(config_));
-    BuildResultCandidates(store, results, segment, pending, translation.get());
-  } else if (!pending.empty() && pending != "-" && pending != "+" &&
-             pending != "!" && has_component) {
+        store, st.components, Codec(), config_.max_results,
+        config_.disabled_blocks_enabled ? &config_.disabled_blocks : nullptr);
+    BuildResultCandidates(store, results, segment, translation.get());
+  } else if (!pending.empty() && has_component) {
     PendingComponents parsed = ParsePendingComponents(store, pending, Codec());
     if (parsed.valid && parsed.tokens.size() >= 2) {
       // 多音节/多汉字连写：一次给出可加入多个部件的组合候选。
@@ -1847,20 +1746,20 @@ rime::an<rime::Translation> IdsReverseTranslator::QueryHybrid(
                                     translation.get());
     } else if (parsed.valid && parsed.tokens.size() == 1) {
       if (!IsAsciiAlphaOnly(parsed.tokens[0])) {
-        // pending 中已有单个汉字（由选中部件写回）。
+        // pending 中已有单个汉字。
         auto cand =
             rime::New<rime::SimpleCandidate>("hanzi_component", segment.start,
                                              segment.end, parsed.tokens[0], "");
         cand->set_quality(100.0);
         translation->Append(cand);
       } else {
-        // ! / - / + 后的输入码仍走正常部件选字流程。
+        // 未解码的输入码仍走正常部件选字流程。
         std::vector<uint32_t> results =
             GetComponentCandidates(store, pending, Codec(), 80);
         BuildComponentCandidates(store, results, segment, translation.get());
       }
     } else if (IsComponentExpression(pending)) {
-      // 原始汉字表达式：一次加入整个表达式，例如 木木!口。
+      // 原始汉字表达式：一次加入整个表达式，例如 木木口!。
       auto cand = rime::New<rime::SimpleCandidate>(
           "hanzi_component", segment.start, segment.end, pending, "部件表达式");
       cand->set_quality(100.0);

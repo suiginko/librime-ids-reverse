@@ -135,87 +135,6 @@ const hash_set<std::string>& AtomicComponents() {
   return kAtomic;
 }
 
-bool IsStrokeGlyph(const std::string& glyph) {
-  if (Utf8Chars(glyph).size() != 1)
-    return false;
-  size_t pos = 0;
-  uint32_t cp = DecodeNext(glyph, &pos);
-  if (cp == 0)
-    return false;
-  // 与 data/generate_data_v4.py 的 STROKE_CHARS 保持一致。
-  static const uint32_t kStrokes[] = {0x4E00, 0x4E28, 0x4E3F, 0x4E36,
-                                      0x4E59, 0x4E85, 0x2E80, 0x2010C};
-  for (uint32_t s : kStrokes) {
-    if (cp == s)
-      return true;
-  }
-  return cp >= 0x31C0 && cp <= 0x31EF;
-}
-
-const hash_set<std::string>& CanonicalAtomicComponents() {
-  static const hash_set<std::string> kSet = [] {
-    hash_set<std::string> set;
-    for (const auto& c : AtomicComponents())
-      set.insert(Canon(c));
-    return set;
-  }();
-  return kSet;
-}
-
-bool IsAtomicGlyph(const std::string& glyph, bool from_leaf) {
-  if (AtomicComponents().count(glyph))
-    return true;
-  // 与 SubtractCharacter 一致：用户给出的顶层字按原始字形判断，保留
-  // 龍 等传统复合字的可拆分性；递归进入叶子后再按归一化字形判断。
-  if (!from_leaf)
-    return false;
-  return CanonicalAtomicComponents().count(Canon(glyph)) != 0;
-}
-
-// 收集减法提示用的基本部件与中间复合部件。基本部件为递归停止处的字形，
-// 中间复合部件为实际继续展开过的字形；两者均保留原始字形。
-void CollectSubtractableParts(IdsStore& store,
-                              const std::string& glyph,
-                              std::vector<std::string>* basics,
-                              std::vector<std::string>* intermediates,
-                              hash_set<std::string>* visiting,
-                              int depth,
-                              bool is_root) {
-  std::string key = Canon(glyph);
-  if (depth > 5 || IsAtomicGlyph(glyph, !is_root) || visiting->count(key)) {
-    if (!is_root)
-      basics->push_back(glyph);
-    return;
-  }
-  std::vector<std::string> leaves =
-      TopLeavesOfComponent(store, glyph, /*preserve_glyph=*/true);
-  if (leaves.size() <= 1) {
-    if (!is_root)
-      basics->push_back(glyph);
-    return;
-  }
-  // 含笔画的字（如 少 = 小 + 丿）在子层视为基本部件不再拆成笔画；
-  // 若是根节点自身（如 术 = 木 + 丶、丁 = 一 + 亅），直接保留其顶层叶子。
-  for (const auto& leaf : leaves) {
-    if (IsStrokeGlyph(leaf)) {
-      if (is_root) {
-        for (const auto& dl : leaves)
-          basics->push_back(dl);
-      } else {
-        basics->push_back(glyph);
-      }
-      return;
-    }
-  }
-  visiting->insert(key);
-  if (!is_root)
-    intermediates->push_back(glyph);
-  for (const auto& leaf : leaves)
-    CollectSubtractableParts(store, leaf, basics, intermediates, visiting,
-                             depth + 1, /*is_root=*/false);
-  visiting->erase(key);
-}
-
 std::vector<std::string> AtomicDecomposition(
     IdsStore& store,
     const std::string& comp,
@@ -938,11 +857,6 @@ std::vector<uint32_t> RankHybrid(IdsStore& store,
 // 加减代数与递归扣除
 // ---------------------------------------------------------------------------
 
-struct AlgebraStep {
-  char op = '+';
-  std::string item;
-};
-
 // 单字部件保留原字形，供递归扣除读取其 IDS 结构；拼音编码仍走常规规范化。
 std::string NormalizeAlgebraItem(IdsStore& store,
                                  const std::string& raw,
@@ -951,67 +865,6 @@ std::string NormalizeAlgebraItem(IdsStore& store,
   if (Utf8Chars(s).size() == 1)
     return s;
   return NormalizeComponent(s, codec);
-}
-
-// 流式解析操作符：支持任意次 + / - / ! 交替；汉字串按字符拆分为独立运算项。
-// ! 是一次性排除：处理完一个 ! 项后恢复为正向，避免影响后续新选的部件。
-// () 只做分组：括号内不允许运算符，括号前的运算符统一作用于组内所有部件。
-std::vector<AlgebraStep> ParseAlgebraSteps(
-    const std::vector<std::string>& components) {
-  std::vector<AlgebraStep> steps;
-  char curr_op = '+';
-  std::vector<char> groups;
-  for (const auto& raw : components) {
-    std::string s = StripSpace(raw);
-    // 上一条以 ! 结尾时，新条目默认恢复正向；显式运算符仍可覆盖。
-    if (groups.empty() && curr_op == '!' && !s.empty() && s[0] != '+' &&
-        s[0] != '-' && s[0] != '!' && s[0] != '(') {
-      curr_op = '+';
-    }
-    size_t i = 0;
-    while (i < s.size()) {
-      char c = s[i];
-      if (c == '(') {
-        groups.push_back(curr_op);
-        ++i;
-      } else if (c == ')') {
-        if (!groups.empty()) {
-          char outer = groups.back();
-          groups.pop_back();
-          if (!groups.empty() && groups.back() == '!')
-            curr_op = '!';
-          else if (outer == '!')
-            curr_op = '+';
-          else
-            curr_op = outer;
-        }
-        ++i;
-      } else if (c == '+' || c == '-' || c == '!') {
-        // 括号内不允许运算符；这里防御性忽略，不改变组内默认运算符。
-        if (groups.empty())
-          curr_op = c;
-        ++i;
-      } else {
-        size_t start = i;
-        while (i < s.size() && s[i] != '+' && s[i] != '-' && s[i] != '!' &&
-               s[i] != '(' && s[i] != ')')
-          ++i;
-        std::string item = s.substr(start, i - start);
-        if (item.empty())
-          continue;
-        if (IsAsciiAlphaOnly(item)) {
-          steps.push_back({curr_op, item});
-        } else {
-          for (const auto& ch : Utf8Chars(item))
-            steps.push_back({curr_op, ch});
-        }
-        // ! 在顶层是一次性的；作为括号默认运算符时对整组生效。
-        if (curr_op == '!' && groups.empty())
-          curr_op = '+';
-      }
-    }
-  }
-  return steps;
 }
 
 // 从 base 的深层部件中递归扣除 neg；成功返回剩余叶子，失败返回 nullopt。
@@ -1325,125 +1178,6 @@ std::vector<uint32_t> SearchByLeaves(IdsStore& store,
 
 namespace {
 
-struct AlgebraEvalState {
-  std::vector<std::string> components;
-  std::vector<std::string> excludes;
-  bool has_sub = false;
-};
-
-void ApplyEvalItem(IdsStore& store,
-                   AlgebraEvalState* st,
-                   char op,
-                   const std::string& raw,
-                   const InputCodec& codec) {
-  std::string item = NormalizeAlgebraItem(store, raw, codec);
-  if (item.empty())
-    return;
-  if (op == '+') {
-    st->components.push_back(item);
-  } else if (op == '!') {
-    st->excludes.push_back(item);
-  } else {
-    st->has_sub = true;
-    st->components = ApplySingleSubtraction(store, st->components, item);
-  }
-}
-
-void MergeEvalGroup(IdsStore& store,
-                    AlgebraEvalState* st,
-                    char op,
-                    const AlgebraEvalState& inner) {
-  st->has_sub = st->has_sub || inner.has_sub;
-  for (const auto& item : inner.components) {
-    if (op == '+') {
-      st->components.push_back(item);
-    } else if (op == '!') {
-      st->excludes.push_back(item);
-    } else {
-      st->has_sub = true;
-      st->components = ApplySingleSubtraction(store, st->components, item);
-    }
-  }
-  for (const auto& e : inner.excludes)
-    st->excludes.push_back(e);
-}
-
-bool IsEvalSeparator(char c) {
-  return c == '\'' || c == ' ' || c == '\t' || c == '\r' || c == '\n' ||
-         c == '.' || c == '_';
-}
-
-size_t EvalAlgebraSeq(IdsStore& store,
-                      const std::string& s,
-                      size_t i,
-                      const InputCodec& codec,
-                      bool stop_at_rparen,
-                      AlgebraEvalState* st) {
-  char op = '+';
-  while (i < s.size()) {
-    char c = s[i];
-    if (c == ')') {
-      if (stop_at_rparen)
-        ++i;
-      break;
-    }
-    if (c == '(') {
-      AlgebraEvalState inner;
-      size_t next = EvalAlgebraSeq(store, s, i + 1, codec, true, &inner);
-      MergeEvalGroup(store, st, op, inner);
-      if (op == '!')
-        op = '+';
-      i = next;
-      continue;
-    }
-    if (c == '+' || c == '-' || c == '!') {
-      op = c;
-      ++i;
-      continue;
-    }
-    if (IsEvalSeparator(c)) {
-      ++i;
-      continue;
-    }
-    size_t start = i;
-    while (i < s.size() && s[i] != '+' && s[i] != '-' && s[i] != '!' &&
-           s[i] != '(' && s[i] != ')' && !IsEvalSeparator(s[i]))
-      ++i;
-    std::string item = s.substr(start, i - start);
-    if (item.empty())
-      continue;
-    if (IsAsciiAlphaOnly(item)) {
-      ApplyEvalItem(store, st, op, item, codec);
-      if (op == '!')
-        op = '+';
-    } else {
-      for (const auto& ch : Utf8Chars(item)) {
-        ApplyEvalItem(store, st, op, ch, codec);
-        if (op == '!')
-          op = '+';
-      }
-    }
-  }
-  return i;
-}
-
-}  // namespace
-
-bool EvaluateAlgebraExpression(IdsStore& store,
-                               const std::string& expression,
-                               const InputCodec& codec,
-                               AlgebraEvaluation* out) {
-  if (!out)
-    return false;
-  AlgebraEvalState st;
-  EvalAlgebraSeq(store, expression, 0, codec, false, &st);
-  out->components = std::move(st.components);
-  out->excludes = std::move(st.excludes);
-  return true;
-}
-
-namespace {
-
 struct RpnValue {
   std::vector<std::string> components;
   std::vector<std::string> excludes;
@@ -1451,28 +1185,99 @@ struct RpnValue {
   bool plus_after_sub = false;
 };
 
-// 逆波兰后缀求值。非运算符层先按中缀表达式解析为一个操作数，因此括号结果、
-// 多字组合部件等都能直接入栈。运算符栈不足时返回 false。
-bool EvaluateRpnComponents(IdsStore& store,
-                           const std::vector<std::string>& tokens,
-                           const InputCodec& codec,
-                           AlgebraEvaluation* out,
-                           bool* pure_sub,
-                           bool* has_sub) {
+struct RpnEvaluation {
+  std::vector<std::string> components;
+  std::vector<std::string> excludes;
+};
+
+bool EvaluateRpnLayers(IdsStore& store,
+                       const std::vector<std::string>& layers,
+                       const InputCodec& codec,
+                       RpnEvaluation* out,
+                       bool* pure_sub,
+                       bool* has_sub);
+
+bool IsOperandSeparator(char c) {
+  return c == '\'' || c == ' ' || c == '\t' || c == '\r' || c == '\n' ||
+         c == '.' || c == '_';
+}
+
+// 把一个状态层展开成一个操作数：ASCII 编码归一化为单个部件；汉字串按字符
+// 拆分为同一操作数的多个部件；若层内自带后缀运算符，则递归按 RPN 求值。
+bool ExpandRpnOperand(IdsStore& store,
+                      const std::string& raw,
+                      const InputCodec& codec,
+                      RpnValue* out) {
+  if (!out)
+    return false;
+  std::string s;
+  for (char c : StripSpace(raw)) {
+    if (!IsOperandSeparator(c))
+      s.push_back(c);
+  }
+  if (s.empty())
+    return false;
+
+  if (IsAsciiAlphaOnly(s)) {
+    std::string item = NormalizeAlgebraItem(store, s, codec);
+    if (item.empty())
+      return false;
+    out->components.push_back(item);
+    return true;
+  }
+
+  std::vector<std::string> tokens;
+  bool has_operator = false;
+  size_t i = 0;
+  while (i < s.size()) {
+    char c = s[i];
+    if (c == '+' || c == '-' || c == '!') {
+      tokens.emplace_back(1, c);
+      has_operator = true;
+      ++i;
+      continue;
+    }
+    if (static_cast<unsigned char>(c) < 0x80)
+      return false;  // 括号、数字等非部件 ASCII 不再属于表达式。
+    size_t start = i;
+    uint32_t cp = DecodeNext(s, &i);
+    if (i == start || cp == 0)
+      return false;
+    tokens.push_back(s.substr(start, i - start));
+  }
+  if (tokens.empty())
+    return false;
+
+  if (!has_operator) {
+    out->components = std::move(tokens);
+    return true;
+  }
+
+  RpnEvaluation inner;
+  bool inner_pure_sub = false;
+  bool inner_has_sub = false;
+  if (!EvaluateRpnLayers(store, tokens, codec, &inner, &inner_pure_sub,
+                         &inner_has_sub))
+    return false;
+  out->components = std::move(inner.components);
+  out->excludes = std::move(inner.excludes);
+  out->has_sub = inner_has_sub;
+  out->plus_after_sub = inner_has_sub && !inner_pure_sub;
+  return true;
+}
+
+// 逆波兰后缀求值。运算符栈不足时返回 false。
+bool EvaluateRpnLayers(IdsStore& store,
+                       const std::vector<std::string>& tokens,
+                       const InputCodec& codec,
+                       RpnEvaluation* out,
+                       bool* pure_sub,
+                       bool* has_sub) {
   if (!out || !pure_sub || !has_sub)
     return false;
 
   std::vector<RpnValue> stack;
   std::vector<std::string> global_excludes;
-
-  auto push_operand = [&](const std::string& text) {
-    AlgebraEvaluation value;
-    EvaluateAlgebraExpression(store, text, codec, &value);
-    RpnValue item;
-    item.components = std::move(value.components);
-    item.excludes = std::move(value.excludes);
-    stack.push_back(std::move(item));
-  };
 
   for (const auto& token : tokens) {
     if (token == "+" || token == "-") {
@@ -1510,7 +1315,10 @@ bool EvaluateRpnComponents(IdsStore& store,
       global_excludes.insert(global_excludes.end(), value.excludes.begin(),
                              value.excludes.end());
     } else {
-      push_operand(token);
+      RpnValue item;
+      if (!ExpandRpnOperand(store, token, codec, &item))
+        return false;
+      stack.push_back(std::move(item));
     }
   }
 
@@ -1546,166 +1354,26 @@ bool EvaluateRpnComponents(IdsStore& store,
 
 }  // namespace
 
-std::vector<std::string> GetSubtractableParts(
-    IdsStore& store,
-    const std::vector<std::string>& components) {
-  std::vector<std::string> parts;
-  if (components.empty())
-    return parts;
-
-  std::string target = components.back();
-  // 负号层/排除层不是可分解的操作数。
-  if (target.empty() || target[0] == '-' || target[0] == '!')
-    return parts;
-  if (target[0] == '+')
-    target.erase(target.begin());
-  if (Utf8Chars(target).size() != 1)
-    return parts;
-
-  std::vector<std::string> basics;
-  std::vector<std::string> intermediates;
-  hash_set<std::string> visiting;
-  CollectSubtractableParts(store, target, &basics, &intermediates, &visiting, 0,
-                           /*is_root=*/true);
-
-  hash_set<std::string> seen;
-  seen.insert(Canon(target));
-  auto is_captured = [&](const std::string& part) -> bool {
-    // 若更早的正向操作数已经能减掉该部件，实际会作用到更早部件，跳过，
-    // 避免提示与实际扣减目标不一致。
-    for (size_t i = 0; i + 1 < components.size(); ++i) {
-      const std::string& comp = components[i];
-      if (comp.empty() || comp[0] == '-' || comp[0] == '+' || comp[0] == '!')
-        continue;
-      if (SubtractCharacter(store, comp, part, 0))
-        return true;
-    }
-    return false;
-  };
-
-  auto add = [&](const std::vector<std::string>& list, bool allow_stroke) {
-    if (parts.size() >= 8)
-      return;
-    for (const auto& part : list) {
-      if (parts.size() >= 8)
-        return;
-      if (part.empty() || (!allow_stroke && IsStrokeGlyph(part)))
-        continue;
-      std::string key = Canon(part);
-      if (!seen.insert(key).second)
-        continue;
-      if (!SubtractCharacter(store, target, part, 0))
-        continue;
-      if (!is_captured(part))
-        parts.push_back(part);
-    }
-  };
-  add(basics, /*allow_stroke=*/true);
-  add(intermediates, /*allow_stroke=*/false);
-
-  // 第二梯队补充：从 CompSet 补充跨枝复合部件（如 渺->泪、屡->屎），按字频降序。
-  size_t pos = 0;
-  uint32_t target_cp = DecodeNext(target, &pos);
-  uint32_t target_id = target_cp != 0 ? store.IdOfCp(target_cp) : kInvalidId;
-  if (target_id != kInvalidId && !basics.empty() && parts.size() < 8) {
-    hash_set<uint16_t> tier1_sub;
-    for (const auto& b : basics) {
-      size_t bpos = 0;
-      uint32_t bcp = DecodeNext(b, &bpos);
-      uint32_t bid = bcp != 0 ? store.IdOfCp(bcp) : kInvalidId;
-      if (bid != kInvalidId) {
-        const uint16_t* cs = nullptr;
-        uint16_t cs_n = 0;
-        store.CompSet(bid, &cs, &cs_n);
-        for (uint16_t i = 0; i < cs_n; ++i)
-          tier1_sub.insert(cs[i]);
-      }
-    }
-    std::vector<std::pair<std::string, uint32_t>> extra;
-    const uint16_t* tcs = nullptr;
-    uint16_t tcs_n = 0;
-    store.CompSet(target_id, &tcs, &tcs_n);
-    for (uint16_t i = 0; i < tcs_n; ++i) {
-      uint16_t tok = tcs[i];
-      if (tier1_sub.count(tok))
-        continue;
-      const std::string& p = store.TokenStr(tok);
-      std::string key = Canon(p);
-      if (p.empty() || seen.count(key) || IsStrokeGlyph(p))
-        continue;
-      uint32_t pcp = store.TokenCp(tok);
-      uint32_t pid = pcp != 0 ? store.IdOfCp(pcp) : kInvalidId;
-      if (pid != kInvalidId) {
-        const uint16_t* lvs = nullptr;
-        uint16_t lvs_n = 0;
-        store.Leaves(pid, &lvs, &lvs_n);
-        if (lvs_n >= 2)
-          extra.emplace_back(p, store.Hot(pid).freq);
-      }
-    }
-    std::stable_sort(
-        extra.begin(), extra.end(),
-        [](const auto& a, const auto& b) { return a.second > b.second; });
-    for (const auto& item : extra) {
-      if (parts.size() >= 8)
-        break;
-      if (!seen.insert(Canon(item.first)).second)
-        continue;
-      if (!is_captured(item.first))
-        parts.push_back(item.first);
-    }
-  }
-  return parts;
-}
-
 std::vector<uint32_t> SearchHybrid(IdsStore& store,
                                    const std::vector<std::string>& components,
                                    const InputCodec& codec,
                                    size_t max_results,
-                                   const rime::hash_set<int>* disabled_blocks,
-                                   bool rpn) {
+                                   const rime::hash_set<int>* disabled_blocks) {
   if (components.empty())
     return {};
 
-  std::vector<std::string> current;
-  std::vector<std::string> excludes;
-  bool pure_sub = true;
+  RpnEvaluation eval;
+  bool pure_sub = false;
   bool has_sub = false;
-
-  if (rpn) {
-    AlgebraEvaluation eval;
-    bool rpn_pure_sub = false;
-    bool rpn_has_sub = false;
-    if (!EvaluateRpnComponents(store, components, codec, &eval, &rpn_pure_sub,
-                               &rpn_has_sub))
-      return {};
-    current = std::move(eval.components);
-    excludes = std::move(eval.excludes);
-    pure_sub = rpn_pure_sub;
-    has_sub = rpn_has_sub;
-  } else {
-    std::vector<AlgebraStep> steps = ParseAlgebraSteps(components);
-    for (const auto& step : steps) {
-      std::string item = NormalizeAlgebraItem(store, step.item, codec);
-      if (item.empty())
-        continue;
-      if (step.op == '+') {
-        if (!current.empty() && has_sub)
-          pure_sub = false;
-        current.push_back(item);
-      } else if (step.op == '!') {
-        excludes.push_back(item);
-      } else {
-        has_sub = true;
-        current = ApplySingleSubtraction(store, current, item);
-      }
-    }
-  }
+  if (!EvaluateRpnLayers(store, components, codec, &eval, &pure_sub, &has_sub))
+    return {};
+  std::vector<std::string> current = std::move(eval.components);
+  std::vector<std::string> excludes = std::move(eval.excludes);
 
   ExcludeEntries exclude_entries = BuildExcludeEntries(store, excludes);
 
   // 纯减法：先给出剩余部件本身，再同步检索包含这些部件的字。
-  // 例如 O达-大：首选 辶，随后列出 边/达/近/连/道 等。
+  // 例如 O达大-：首选 辶，随后列出 边/达/近/连/道 等。
   if (pure_sub && has_sub && !current.empty()) {
     std::vector<uint32_t> results = PureSubtractionResults(store, current);
     RemoveExcluded(store, exclude_entries, &results);

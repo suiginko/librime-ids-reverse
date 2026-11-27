@@ -28,7 +28,6 @@ patch:
     #   - xform/^sh/u/
     #   - xform/iu$/q/
     #   - xform/(.)ei$/$1w/
-    algebra_notation: infix   # infix（默认）| rpn
     show_pinyin: true
     show_ids: true
     show_unicode: true
