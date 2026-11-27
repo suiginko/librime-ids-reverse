@@ -812,18 +812,6 @@ class HybridFilterTranslation : public rime::PrefetchTranslation {
       if (!component_stage)
         continue;
 
-      // 括号表达式编辑门禁：
-      // 如果当前处于单组括号编辑中，且 pending 里没有待消歧的 ASCII 字母段（汉字已选定，如 -(纱），
-      // 此时属于等待闭合或等待下一运算符阶段，严禁放行任何杂项/同音候选！
-      HybridState st = ReadHybridState(ctx_, hybrid_prefix_);
-      PendingGroup group = ParseSingleGroup(st.pending);
-      if (group.valid) {
-        size_t run_start = 0, run_end = 0;
-        if (!FindLastAsciiRun(st.pending, &run_start, &run_end)) {
-          break;
-        }
-      }
-
       if (next->start() >= seg.start && next->end() <= seg.end &&
           IsComponentExpression(next->text()) &&
           seen_.insert(next->text()).second) {
