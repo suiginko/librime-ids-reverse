@@ -437,22 +437,129 @@ local function resolve_data_path(filename)
   return filename
 end
 
+local PAGE_SHIFT = 12
+local PAGE_SIZE = 4096
+local PAGE_MASK = 4095
+local MAX_PAGES = 256
+
+function Store:get_page(pidx)
+  local page = self.pages[pidx]
+  if page then return page end
+  local ring = self.page_ring
+  if #ring >= MAX_PAGES then
+    local pos = self.page_ring_pos
+    local evict = ring[pos]
+    if evict ~= nil then self.pages[evict] = nil end
+    ring[pos] = pidx
+    self.page_ring_pos = (pos % MAX_PAGES) + 1
+  else
+    ring[#ring + 1] = pidx
+  end
+  self.fh:seek("set", pidx * PAGE_SIZE)
+  page = self.fh:read(PAGE_SIZE) or ""
+  self.pages[pidx] = page
+  return page
+end
+
+function Store:read_slice(off, len)
+  if len <= 0 then return "" end
+  if len <= PAGE_SIZE then
+    local p1 = off >> PAGE_SHIFT
+    local p2 = (off + len - 1) >> PAGE_SHIFT
+    if p1 == p2 then
+      local poff = off & PAGE_MASK
+      return self:get_page(p1):sub(poff + 1, poff + len)
+    end
+  end
+  self.fh:seek("set", off)
+  return self.fh:read(len) or ""
+end
+
+function Store:rd8(off)
+  local page = self:get_page(off >> PAGE_SHIFT)
+  return page:byte((off & PAGE_MASK) + 1) or 0
+end
+
+function Store:rd16(off)
+  local p1 = off >> PAGE_SHIFT
+  local p2 = (off + 1) >> PAGE_SHIFT
+  if p1 == p2 then
+    return (string.unpack("<I2", self:get_page(p1), (off & PAGE_MASK) + 1))
+  end
+  return (string.unpack("<I2", self:read_slice(off, 2), 1))
+end
+
+function Store:rd32(off)
+  local p1 = off >> PAGE_SHIFT
+  local p2 = (off + 3) >> PAGE_SHIFT
+  if p1 == p2 then
+    return (string.unpack("<I4", self:get_page(p1), (off & PAGE_MASK) + 1))
+  end
+  return (string.unpack("<I4", self:read_slice(off, 4), 1))
+end
+
+function Store:rd64(off)
+  local p1 = off >> PAGE_SHIFT
+  local p2 = (off + 7) >> PAGE_SHIFT
+  if p1 == p2 then
+    return (string.unpack("<I8", self:get_page(p1), (off & PAGE_MASK) + 1))
+  end
+  return (string.unpack("<I8", self:read_slice(off, 8), 1))
+end
+
+function Store:unpack_at(fmt, off, byte_len)
+  local p1 = off >> PAGE_SHIFT
+  local p2 = (off + byte_len - 1) >> PAGE_SHIFT
+  if p1 == p2 then
+    return string.unpack(fmt, self:get_page(p1), (off & PAGE_MASK) + 1)
+  end
+  return string.unpack(fmt, self:read_slice(off, byte_len), 1)
+end
+
+function Store:read_token_array(off)
+  local n = self:rd16(off)
+  local out = {}
+  if n == 0 then return out end
+  local slice = self:read_slice(off + 2, n * 2)
+  local values = { string.unpack(array_format(TOKEN_ARRAY_FORMAT, n, "I2"),
+                                 slice, 1) }
+  for i = 1, n do out[i] = values[i] end
+  return out
+end
+
+function Store:close()
+  if self.fh then
+    self.fh:close()
+    self.fh = nil
+  end
+  self.pages = {}
+  self.page_ring = {}
+end
+
 function Store.load(path, custom_path)
-  local blob, err = read_file(path)
-  if not blob then return nil, err or ("cannot open " .. path) end
-  if #blob < 32 or blob:sub(1, 4) ~= "IDS4" then
+  local fh, err = io.open(path, "rb")
+  if not fh then return nil, err or ("cannot open " .. path) end
+  local file_size = fh:seek("end") or 0
+  fh:seek("set", 0)
+  local hdr = fh:read(32)
+  if not hdr or #hdr < 32 or hdr:sub(1, 4) ~= "IDS4" then
+    fh:close()
     return nil, "invalid IDS4 file"
   end
 
   local self = setmetatable({}, Store)
   self.path = path
   self.custom_path = custom_path
-  self.blob = blob
-  self.size = #blob
+  self.fh = fh
+  self.size = file_size
+  self.pages = {}
+  self.page_ring = {}
+  self.page_ring_pos = 1
 
   local magic, version, flags, max_cp, num_chars, nkeys, nsec =
-      string.unpack("<c4HHIIII", blob, 1)
+      string.unpack("<c4HHIIII", hdr, 1)
   if version ~= 3 then
+    self:close()
     return nil, "old IDS4 data (version " .. tostring(version) ..
                 "), please regenerate ids_data.bin"
   end
@@ -464,10 +571,21 @@ function Store.load(path, custom_path)
   self.num_tokens = 0
   self.sections = {}
 
-  if #blob < 32 + nsec * 24 then return nil, "truncated section table" end
+  if file_size < 32 + nsec * 24 then
+    self:close()
+    return nil, "truncated section table"
+  end
+  local sec_buf = fh:read(nsec * 24)
+  if not sec_buf or #sec_buf < nsec * 24 then
+    self:close()
+    return nil, "truncated section table"
+  end
   for i = 0, nsec - 1 do
-    local type, pad, off, len = string.unpack("<I4I4I8I8", blob, 33 + i * 24)
-    if off + len > #blob or off > #blob then return nil, "bad section" end
+    local type, pad, off, len = string.unpack("<I4I4I8I8", sec_buf, 1 + i * 24)
+    if off + len > file_size or off > file_size then
+      self:close()
+      return nil, "bad section"
+    end
     self.sections[type] = { off = off, len = len }
   end
 
@@ -505,8 +623,9 @@ function Store.load(path, custom_path)
     self.atomic_set_off = self.sections[SEC_ATOMIC_SET].off
   end
   self.leaf_struct_off = self.sections[SEC_LEAF_STRUCT].off
-  self.leaf_struct_count = rd32(blob, self.leaf_struct_off)
+  self.leaf_struct_count = self:rd32(self.leaf_struct_off)
   if 4 + self.leaf_struct_count * 8 > self.sections[SEC_LEAF_STRUCT].len then
+    self:close()
     return nil, "bad LEAF_STRUCT section"
   end
 
@@ -534,28 +653,28 @@ end
 
 function Store:id_of_cp(cp)
   if cp == 0 or cp >= self.max_cp then return INVALID_ID end
-  local v = rd32(self.blob, self.cp2id_off + cp * 4)
+  local v = self:rd32(self.cp2id_off + cp * 4)
   if v == 0 then return INVALID_ID end
   return v - 1
 end
 
 function Store:cp_of_id(id)
   if id >= self.num_chars then return 0 end
-  return rd32(self.blob, self.id2cp_off + id * 4)
+  return self:rd32(self.id2cp_off + id * 4)
 end
 
 function Store:hot_freq(id)
   local hit = self.hot_cache[id]
   if hit then return hit.freq end
   if id >= self.num_chars then return 0 end
-  return rd32(self.blob, self.hot_off + id * 24)
+  return self:rd32(self.hot_off + id * 24)
 end
 
 function Store:hot_block(id)
   local hit = self.hot_cache[id]
   if hit then return hit.block end
   if id >= self.num_chars then return 0 end
-  return self.blob:byte(self.hot_off + id * 24 + 12) or 0
+  return self:rd8(self.hot_off + id * 24 + 11)
 end
 
 function Store:hot_score_fields(id)
@@ -564,7 +683,7 @@ function Store:hot_score_fields(id)
     return hit.freq, hit.flags, hit.char_token, hit.depth, hit.alts_off
   end
   if id >= self.num_chars then return 0, 0, NO_TOKEN, 0, 0 end
-  return string.unpack("<I4I4I2I1xI4", self.blob, self.hot_off + id * 24 + 1)
+  return self:unpack_at("<I4I4I2I1xI4", self.hot_off + id * 24, 16)
 end
 
 function Store:hot(id)
@@ -575,7 +694,7 @@ function Store:hot(id)
   local hit = self.hot_cache[id]
   if hit then return hit end
   local freq, flags, char_token, depth, block, alts_off, leaf_off, atom_off =
-      string.unpack("<I4I4I2I1I1I4I4I4", self.blob, self.hot_off + id * 24 + 1)
+      self:unpack_at("<I4I4I2I1I1I4I4I4", self.hot_off + id * 24, 24)
   local rec = { freq = freq, flags = flags, char_token = char_token,
                 depth = depth, block = block, alts_off = alts_off,
                 leaf_off = leaf_off, atom_off = atom_off }
@@ -585,7 +704,7 @@ end
 
 function Store:cold_idx(id)
   local off = self.cold_idx_off + id * 8
-  local cs_off, cold_off = string.unpack("<I4I4", self.blob, off + 1)
+  local cs_off, cold_off = self:unpack_at("<I4I4", off, 8)
   return cs_off, cold_off
 end
 
@@ -595,11 +714,11 @@ function Store:cold(id)
   if hit then return hit[1], hit[2] end
   local _, cold_off = self:cold_idx(id)
   local p = self.cold_off + cold_off
-  local py_len = rd16(self.blob, p)
-  local py = self.blob:sub(p + 3, p + 2 + py_len)
+  local py_len = self:rd16(p)
+  local py = py_len > 0 and self:read_slice(p + 2, py_len) or ""
   p = p + 2 + py_len
-  local ids_len = rd16(self.blob, p)
-  local ids = self.blob:sub(p + 3, p + 2 + ids_len)
+  local ids_len = self:rd16(p)
+  local ids = ids_len > 0 and self:read_slice(p + 2, ids_len) or ""
   self.cold_cache[id] = { py, ids }
   return py, ids
 end
@@ -609,7 +728,7 @@ function Store:comp_set(id)
   local hit = self.compset_cache[id]
   if hit then return hit end
   local cs_off = self:cold_idx(id)
-  local out = read_token_array(self.blob, self.compset_off + cs_off)
+  local out = self:read_token_array(self.compset_off + cs_off)
   self.compset_cache[id] = out
   return out
 end
@@ -619,8 +738,8 @@ function Store:leaves(id)
   local hit = self.leaves_cache[id]
   if hit then return hit end
   local h = self.hot_cache[id]
-  local leaf_off = h and h.leaf_off or rd32(self.blob, self.hot_off + id * 24 + 16)
-  local out = read_token_array(self.blob, self.leaves_off + leaf_off)
+  local leaf_off = h and h.leaf_off or self:rd32(self.hot_off + id * 24 + 16)
+  local out = self:read_token_array(self.leaves_off + leaf_off)
   self.leaves_cache[id] = out
   return out
 end
@@ -635,14 +754,14 @@ function Store:lookup_leaf_structure(tokens)
   local lo, hi = 0, self.leaf_struct_count
   while lo < hi do
     local mid = lo + (hi - lo) // 2
-    local h = rd32(self.blob, self.leaf_struct_off + 4 + mid * 8)
+    local h = self:rd32(self.leaf_struct_off + 4 + mid * 8)
     if h < hash then lo = mid + 1 else hi = mid end
   end
   local got = {}
   for i = lo, self.leaf_struct_count - 1 do
     local base = self.leaf_struct_off + 4 + i * 8
-    if rd32(self.blob, base) ~= hash then break end
-    local id = rd32(self.blob, base + 4)
+    if self:rd32(base) ~= hash then break end
+    local id = self:rd32(base + 4)
     local lv = self:leaves(id)
     if #lv == #want then
       got = {}
@@ -663,18 +782,19 @@ function Store:atomics(id)
   local hit = self.atoms_cache[id]
   if hit then return hit end
   local h = self.hot_cache[id]
-  local atom_off = h and h.atom_off or rd32(self.blob, self.hot_off + id * 24 + 20)
-  local out = read_token_array(self.blob, self.atoms_off + atom_off)
+  local atom_off = h and h.atom_off or self:rd32(self.hot_off + id * 24 + 20)
+  local out = self:read_token_array(self.atoms_off + atom_off)
   self.atoms_cache[id] = out
   return out
 end
 
 function Store:parse_tokens()
   local sec = self.sections[SEC_TOKENS]
-  local p = sec.off
-  local endp = sec.off + sec.len
+  local buf = self:read_slice(sec.off, sec.len)
+  local p = 0
+  local endp = #buf
   if p + 2 > endp then return false end
-  local n = rd16(self.blob, p)
+  local n = rd16(buf, p)
   p = p + 2
   self.num_tokens = n
   self.token_str = {}
@@ -682,21 +802,23 @@ function Store:parse_tokens()
   self.token_index = {}
   for t = 0, n - 1 do
     if p + 2 > endp then return false end
-    local len = rd16(self.blob, p)
+    local len = rd16(buf, p)
     p = p + 2
     if p + len + 4 > endp then return false end
-    local s = self.blob:sub(p + 1, p + len)
+    local s = buf:sub(p + 1, p + len)
     p = p + len
-    local cp = rd32(self.blob, p)
+    local cp = rd32(buf, p)
     p = p + 4
     self.token_str[t] = s
     self.token_cp[t] = cp
     self.token_index[s] = t
   end
   if self.sections[SEC_TOK_CANON] then
+    local csec = self.sections[SEC_TOK_CANON]
+    local cbuf = self:read_slice(csec.off, csec.len)
     self.tok_canon = {}
     for t = 0, n - 1 do
-      self.tok_canon[t] = rd16(self.blob, self.tok_canon_off + t * 2)
+      self.tok_canon[t] = rd16(cbuf, t * 2)
     end
   end
   return true
@@ -704,25 +826,26 @@ end
 
 function Store:parse_py()
   local sec = self.sections[SEC_PY]
-  local p = sec.off
-  local endp = sec.off + sec.len
+  local buf = self:read_slice(sec.off, sec.len)
+  local p = 0
+  local endp = #buf
   if p + 2 > endp then return false end
-  local np = rd16(self.blob, p)
+  local np = rd16(buf, p)
   p = p + 2
   self.py_map = {}
   self.valid_pinyins = {}
   for _ = 1, np do
     if p + 2 > endp then return false end
-    local len = rd16(self.blob, p)
+    local len = rd16(buf, p)
     p = p + 2
     if p + len + 2 > endp then return false end
-    local py = self.blob:sub(p + 1, p + len)
+    local py = buf:sub(p + 1, p + len)
     p = p + len
-    local m = rd16(self.blob, p)
+    local m = rd16(buf, p)
     p = p + 2
     local ids = {}
     for j = 1, m do
-      ids[j] = rd16(self.blob, p)
+      ids[j] = rd16(buf, p)
       p = p + 2
     end
     self.py_map[py] = ids
@@ -733,25 +856,26 @@ end
 
 function Store:parse_py_char()
   local sec = self.sections[SEC_PY_CHAR]
-  local p = sec.off
-  local endp = sec.off + sec.len
+  local buf = self:read_slice(sec.off, sec.len)
+  local p = 0
+  local endp = #buf
   if p + 2 > endp then return false end
-  local np = rd16(self.blob, p)
+  local np = rd16(buf, p)
   p = p + 2
   self.py_char_map = {}
   for _ = 1, np do
     if p + 2 > endp then return false end
-    local len = rd16(self.blob, p)
+    local len = rd16(buf, p)
     p = p + 2
     if p + len + 2 > endp then return false end
-    local py = self.blob:sub(p + 1, p + len)
+    local py = buf:sub(p + 1, p + len)
     p = p + len
-    local m = rd16(self.blob, p)
+    local m = rd16(buf, p)
     p = p + 2
     if p + m * 4 > endp then return false end
     local ids = {}
     for j = 1, m do
-      ids[j] = rd32(self.blob, p)
+      ids[j] = rd32(buf, p)
       p = p + 4
     end
     self.py_char_map[py] = ids
@@ -760,17 +884,21 @@ function Store:parse_py_char()
 end
 
 function Store:parse_key_recs()
+  local kl_sec = self.sections[SEC_KEY_LOOKUP]
+  local kl_buf = self:read_slice(kl_sec.off, kl_sec.len)
   self.key_lookup = {}
   for t = 0, self.num_tokens do
-    self.key_lookup[t] = rd32(self.blob, self.key_lookup_off + t * 4)
+    self.key_lookup[t] = rd32(kl_buf, t * 4)
   end
   self.key_recs = {}
-  local p = self.key_rec_off
-  local endp = self.key_rec_off + self.sections[SEC_KEY_REC].len
+  local kr_sec = self.sections[SEC_KEY_REC]
+  local kr_buf = self:read_slice(kr_sec.off, kr_sec.len)
+  local p = 0
+  local endp = #kr_buf
   local i = 0
   while p + 20 <= endp do
     local mult, kind, _, head_off, head_cnt, full_off, full_cnt =
-        string.unpack("<I1I1I2I4I4I4I4", self.blob, p + 1)
+        string.unpack("<I1I1I2I4I4I4I4", kr_buf, p + 1)
     self.key_recs[i] = { mult = mult, kind = kind, head_off = head_off,
                          head_cnt = head_cnt, full_off = full_off,
                          full_cnt = full_cnt }
@@ -783,14 +911,15 @@ function Store:parse_atomic_set()
   self.atomic_tokens = {}
   if not self.atomic_set_off then return end
   local sec = self.sections[SEC_ATOMIC_SET]
-  local p = sec.off
-  local endp = sec.off + sec.len
+  local buf = self:read_slice(sec.off, sec.len)
+  local p = 0
+  local endp = #buf
   if p + 2 > endp then return end
-  local n = rd16(self.blob, p)
+  local n = rd16(buf, p)
   p = p + 2
   if p + n * 2 > endp then return end
   for _ = 1, n do
-    self.atomic_tokens[rd16(self.blob, p)] = true
+    self.atomic_tokens[rd16(buf, p)] = true
     p = p + 2
   end
 end
@@ -863,9 +992,9 @@ function Store:head_ids(entry, count)
   local n = count or entry.head_cnt
   local out = {}
   if n == 0 then return out end
+  local slice = self:read_slice(self.post_off + entry.head_off, n * 4)
   local values = { string.unpack(array_format(U32_ARRAY_FORMAT, n, "I4"),
-                                 self.blob,
-                                 self.post_off + entry.head_off + 1) }
+                                 slice, 1) }
   for i = 1, n do out[i] = values[i] end
   return out
 end
@@ -875,15 +1004,15 @@ function Store:get_words(entry)
   if w then return w end
   w = {}
   local words_count = (self.num_chars + 63) >> 6
-  local pos = self.post_off + entry.full_off
+  local slice = self:read_slice(self.post_off + entry.full_off, words_count * 8)
+  local pos = 0
   local remaining = words_count
   local idx = 0
   local chunk = 256
-  local blob = self.blob
   while remaining > 0 do
     local n = remaining < chunk and remaining or chunk
     local values = { string.unpack(array_format(U64_ARRAY_FORMAT, n, "I8"),
-                                   blob, pos + 1) }
+                                   slice, pos + 1) }
     for i = 1, n do
       idx = idx + 1
       w[idx] = values[i]
@@ -901,7 +1030,7 @@ function Store:full_contains(entry, id)
     local base = self.post_off + entry.full_off
     while lo <= hi do
       local mid = (lo + hi) // 2
-      local v = rd32(self.blob, base + mid * 4)
+      local v = self:rd32(base + mid * 4)
       if v == id then return true end
       if v < id then lo = mid + 1 else hi = mid - 1 end
     end
@@ -913,20 +1042,21 @@ function Store:full_contains(entry, id)
     return word ~= nil and ((word >> (id & 63)) & 1) ~= 0
   end
   local base = self.post_off + entry.full_off
-  local word = rd64(self.blob, base + (id >> 6) * 8)
+  local word = self:rd64(base + (id >> 6) * 8)
   return ((word >> (id & 63)) & 1) ~= 0
 end
 
 function Store:for_each_full(entry, f)
   if entry.kind == 0 then
     local base = self.post_off + entry.full_off
+    local slice = self:read_slice(base, entry.full_cnt * 4)
     local remaining = entry.full_cnt
-    local pos = base
+    local pos = 0
     local chunk = 256
     while remaining > 0 do
       local n = remaining < chunk and remaining or chunk
       local values = { string.unpack(array_format(U32_ARRAY_FORMAT, n, "I4"),
-                                     self.blob, pos + 1) }
+                                     slice, pos + 1) }
       for i = 1, n do
         if f(values[i]) == false then return end
       end
@@ -934,10 +1064,10 @@ function Store:for_each_full(entry, f)
       remaining = remaining - n
     end
   else
-    local base = self.post_off + entry.full_off
-    local words = (self.num_chars + 63) >> 6
+    local words_arr = self:get_words(entry)
+    local words = #words_arr
     for w = 0, words - 1 do
-      local word = rd64(self.blob, base + w * 8)
+      local word = words_arr[w + 1]
       if word ~= 0 then
         for bit = 0, 63 do
           if ((word >> bit) & 1) ~= 0 then
@@ -955,12 +1085,15 @@ function Store:variants(id)
   if id >= self.num_chars or not self.var_off_off then return {} end
   local hit = self.variants_cache[id]
   if hit then return hit end
-  local off = rd32(self.blob, self.var_off_off + id * 4)
+  local off = self:rd32(self.var_off_off + id * 4)
   local p = self.var_off_data + off
-  local n = rd16(self.blob, p)
+  local n = self:rd16(p)
   local out = {}
-  for i = 1, n do
-    out[i] = rd32(self.blob, p + 2 + (i - 1) * 4)
+  if n > 0 then
+    local slice = self:read_slice(p + 2, n * 4)
+    for i = 1, n do
+      out[i] = rd32(slice, (i - 1) * 4)
+    end
   end
   self.variants_cache[id] = out
   return out
@@ -2040,15 +2173,14 @@ end
 local function check_direct_match(store, alts_off, total, matchers,
                                   all_singleton, target_sig)
   if total == 0 or total > 64 then return 0 end
-  local blob = store.blob
   local p = store.alts_off + alts_off
-  local ng = rd8(blob, p)
+  local ng = store:rd8(p)
   p = p + 1
   local best = 0
   for _ = 1, ng do
-    local L = rd8(blob, p)
+    local L = store:rd8(p)
     p = p + 1
-    local nv = rd16(blob, p)
+    local nv = store:rd16(p)
     p = p + 2
     if L ~= total then
       p = p + nv * (L * 2 + 4)
@@ -2056,10 +2188,10 @@ local function check_direct_match(store, alts_off, total, matchers,
       for _ = 1, nv do
         local tok = p
         local ordered = false
-        if not all_singleton or rd32(blob, tok + L * 2) == target_sig then
+        if not all_singleton or store:rd32(tok + L * 2) == target_sig then
           ordered = true
           for i = 1, total do
-            if not matcher_has(matchers[i], rd16(blob, tok + (i - 1) * 2)) then
+            if not matcher_has(matchers[i], store:rd16(tok + (i - 1) * 2)) then
               ordered = false
               break
             end
@@ -2068,17 +2200,17 @@ local function check_direct_match(store, alts_off, total, matchers,
         if ordered then return 2 end
         if best < 1 then
           if total == 2 then
-            local c0 = rd16(blob, tok)
-            local c1 = rd16(blob, tok + 2)
+            local c0 = store:rd16(tok)
+            local c1 = store:rd16(tok + 2)
             local m0, m1 = matchers[1], matchers[2]
             if (matcher_has(m0, c0) and matcher_has(m1, c1))
                or (matcher_has(m0, c1) and matcher_has(m1, c0)) then
               best = 1
             end
           elseif total == 3 then
-            local c0 = rd16(blob, tok)
-            local c1 = rd16(blob, tok + 2)
-            local c2 = rd16(blob, tok + 4)
+            local c0 = store:rd16(tok)
+            local c1 = store:rd16(tok + 2)
+            local c2 = store:rd16(tok + 4)
             local m0, m1, m2 = matchers[1], matchers[2], matchers[3]
             if (matcher_has(m0, c0) and
                 ((matcher_has(m1, c1) and matcher_has(m2, c2)) or
@@ -2093,7 +2225,7 @@ local function check_direct_match(store, alts_off, total, matchers,
             end
           else
             local comps = {}
-            for i = 1, total do comps[i] = rd16(blob, tok + (i - 1) * 2) end
+            for i = 1, total do comps[i] = store:rd16(tok + (i - 1) * 2) end
             local used = {}
             if bipartite_match(comps, total, matchers, used, 1) then best = 1 end
           end
@@ -3008,12 +3140,12 @@ local function intersect_postings(store, terms, counts)
               local base = store.post_off + other.full_off
               local p = cursor[i][j]
               while p < other.full_cnt
-                    and rd32(store.blob, base + p * 4) < id do
+                    and store:rd32(base + p * 4) < id do
                 p = p + 1
               end
               cursor[i][j] = p
               if p < other.full_cnt
-                 and rd32(store.blob, base + p * 4) == id then
+                 and store:rd32(base + p * 4) == id then
                 matched = true
                 break
               end
