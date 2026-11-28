@@ -884,27 +884,8 @@ function Store:parse_py_char()
 end
 
 function Store:parse_key_recs()
-  local kl_sec = self.sections[SEC_KEY_LOOKUP]
-  local kl_buf = self:read_slice(kl_sec.off, kl_sec.len)
-  self.key_lookup = {}
-  for t = 0, self.num_tokens do
-    self.key_lookup[t] = rd32(kl_buf, t * 4)
-  end
   self.key_recs = {}
-  local kr_sec = self.sections[SEC_KEY_REC]
-  local kr_buf = self:read_slice(kr_sec.off, kr_sec.len)
-  local p = 0
-  local endp = #kr_buf
-  local i = 0
-  while p + 20 <= endp do
-    local mult, kind, _, head_off, head_cnt, full_off, full_cnt =
-        string.unpack("<I1I1I2I4I4I4I4", kr_buf, p + 1)
-    self.key_recs[i] = { mult = mult, kind = kind, head_off = head_off,
-                         head_cnt = head_cnt, full_off = full_off,
-                         full_cnt = full_cnt }
-    p = p + 20
-    i = i + 1
-  end
+  self.num_key_recs = self.sections[SEC_KEY_REC].len // 20
 end
 
 function Store:parse_atomic_set()
@@ -955,11 +936,19 @@ end
 
 function Store:find_key_by_token(token, mult)
   if token >= self.num_tokens then return nil end
-  local b = self.key_lookup[token] or 0
-  local e = self.key_lookup[token + 1] or b
+  local b, e = self:unpack_at("<I4I4", self.key_lookup_off + token * 4, 8)
+  if e > self.num_key_recs then e = self.num_key_recs end
   for i = b, e - 1 do
     local rec = self.key_recs[i]
-    if rec and rec.mult == mult then return rec end
+    if not rec then
+      local m, kind, _, head_off, head_cnt, full_off, full_cnt =
+          self:unpack_at("<I1I1I2I4I4I4I4", self.key_rec_off + i * 20, 20)
+      rec = { mult = m, kind = kind, head_off = head_off,
+              head_cnt = head_cnt, full_off = full_off,
+              full_cnt = full_cnt }
+      self.key_recs[i] = rec
+    end
+    if rec.mult == mult then return rec end
   end
   return nil
 end
@@ -3118,9 +3107,20 @@ local function intersect_postings(store, terms, counts)
   local seed_seen = {}
   local need_dedup = #term_keys[seed_index].entries > 1
   local cursor = {}
+  local other_bufs = {}
   for i = 1, #term_keys do
     cursor[i] = {}
-    for j = 1, #term_keys[i].entries do cursor[i][j] = 0 end
+    other_bufs[i] = {}
+    for j = 1, #term_keys[i].entries do
+      cursor[i][j] = 0
+      if i ~= seed_index then
+        local other = term_keys[i].entries[j]
+        if other.kind == 0 then
+          other_bufs[i][j] = store:read_slice(store.post_off + other.full_off,
+                                              other.full_cnt * 4)
+        end
+      end
+    end
   end
 
   for _, se in ipairs(term_keys[seed_index].entries) do
@@ -3137,15 +3137,15 @@ local function intersect_postings(store, terms, counts)
           for j = 1, #entries do
             local other = entries[j]
             if other.kind == 0 then
-              local base = store.post_off + other.full_off
+              local obuf = other_bufs[i][j]
               local p = cursor[i][j]
               while p < other.full_cnt
-                    and store:rd32(base + p * 4) < id do
+                    and rd32(obuf, p * 4) < id do
                 p = p + 1
               end
               cursor[i][j] = p
               if p < other.full_cnt
-                 and store:rd32(base + p * 4) == id then
+                 and rd32(obuf, p * 4) == id then
                 matched = true
                 break
               end
